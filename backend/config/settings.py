@@ -23,7 +23,7 @@ TEXT_EXTRACTION_CHARS = 2000
 
 # ── Ollama ──────────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "llama3.2:3b"   # modèle léger, rapide
+OLLAMA_MODEL    = "qwen2.5:7b"    # modèle performant pour la classification
 
 # ── Mots-clés de scoring ────────────────────────────────────────────────────
 KEYWORDS_STRONG = [
