@@ -91,13 +91,21 @@ def run() -> list[dict]:
             "scorer_verdict": score_result["verdict"],
         })
 
+        # PDF scanné sans texte → forcer ambiguous pour qu'Ollama utilise
+        # le nom du fichier comme contexte de secours
+        if read_result["is_scanned"] and not text:
+            score_result["verdict"] = "ambiguous"
+
         if score_result["verdict"] != "ambiguous":
             report["final_verdict"] = score_result["verdict"]
         else:
             # ── Étape 3 : Ollama pour les ambigus ─────────────────────────
+            # Si le texte est vide (OCR a échoué), on donne au moins le nom
+            # du fichier comme indice à Ollama
+            context = text if text else f"[Fichier PDF scanné, texte non extrait]\nNom du fichier : {pdf_path.name}"
             report["llm_used"] = True
             stats["llm_used"] += 1
-            llm_result = classify_with_llm(text)
+            llm_result = classify_with_llm(context)
             report["llm_verdict"] = llm_result["verdict"]
             report["llm_reason"]  = llm_result["reason"]
 

@@ -3,6 +3,8 @@ Calcule un score TdR pour un texte donné en cherchant
 des mots-clés forts, faibles et d'exclusion.
 """
 
+import unicodedata
+
 from config.settings import (
     KEYWORDS_STRONG,
     KEYWORDS_WEAK,
@@ -15,6 +17,20 @@ from config.settings import (
 )
 
 
+def _normalize(s: str) -> str:
+    """Passe en minuscules et supprime les accents.
+    'Termes de Références' → 'termes de references'
+    Permet de matcher les textes OCR imparfaits et les variantes orthographiques.
+    """
+    return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode("ascii")
+
+
+# Pré-normalisation des listes pour ne pas recalculer à chaque appel
+_STRONG_NORM = [(_normalize(kw), kw) for kw in KEYWORDS_STRONG]
+_WEAK_NORM   = [(_normalize(kw), kw) for kw in KEYWORDS_WEAK]
+_EXCL_NORM   = [(_normalize(kw), kw) for kw in KEYWORDS_EXCLUSION]
+
+
 def compute_score(text: str) -> dict:
     """
     Analyse le texte et retourne :
@@ -24,11 +40,11 @@ def compute_score(text: str) -> dict:
       - matched_excl  : mots d'exclusion trouvés
       - verdict       : "tdr" | "rejected" | "ambiguous"
     """
-    text_lower = text.lower()
+    text_norm = _normalize(text)
 
-    matched_strong = [kw for kw in KEYWORDS_STRONG if kw in text_lower]
-    matched_weak   = [kw for kw in KEYWORDS_WEAK   if kw in text_lower]
-    matched_excl   = [kw for kw in KEYWORDS_EXCLUSION if kw in text_lower]
+    matched_strong = [kw for kw_norm, kw in _STRONG_NORM if kw_norm in text_norm]
+    matched_weak   = [kw for kw_norm, kw in _WEAK_NORM   if kw_norm in text_norm]
+    matched_excl   = [kw for kw_norm, kw in _EXCL_NORM   if kw_norm in text_norm]
 
     score = (
         len(matched_strong) * WEIGHT_STRONG

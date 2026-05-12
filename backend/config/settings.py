@@ -18,8 +18,13 @@ SCORE_TDR_CONFIRMED   = 5
 SCORE_REJECTED        = 0
 # Entre les deux → Ollama tranche
 
-# Nombre de caractères extraits pour l'analyse (première page suffit)
-TEXT_EXTRACTION_CHARS = 2000
+# Nombre de caractères extraits pour l'analyse
+TEXT_EXTRACTION_CHARS = 5000
+
+# ── OCR ─────────────────────────────────────────────────────────────────────
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+OCR_LANGUAGES = "fra+eng"  # français + anglais
+OCR_MAX_PAGES = 3          # pages analysées par OCR (couvre les couvertures vides)
 
 # ── Ollama ──────────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -27,8 +32,8 @@ OLLAMA_MODEL    = "qwen2.5:7b"    # modèle performant pour la classification
 
 # ── Mots-clés de scoring ────────────────────────────────────────────────────
 KEYWORDS_STRONG = [
+    # Français
     "termes de référence",
-    "terms of reference",
     "appel à candidatures",
     "appel d'offres",
     "profil du consultant",
@@ -41,9 +46,23 @@ KEYWORDS_STRONG = [
     "mission de consultance",
     "avis de recrutement",
     "avis de manifestation d'intérêt",
+    # Anglais
+    "terms of reference",
+    "call for consultants",
+    "request for proposals",
+    "scope of work",
+    "statement of work",
+    "consultant profile",
+    "expected deliverables",
+    "recruitment of a consultant",
+    "recruitment of an expert",
+    "expression of interest",
+    "individual consultant",
+    "consulting firm",
 ]
 
 KEYWORDS_WEAK = [
+    # Français
     "consultant",
     "expertise",
     "mission",
@@ -55,20 +74,36 @@ KEYWORDS_WEAK = [
     "méthodologie",
     "rapport final",
     "durée de la mission",
+    "prestataire",
+    "soumissionnaire",
+    # Anglais
+    "deliverables",
+    "qualifications required",
+    "required experience",
+    "methodology",
+    "final report",
+    "duration of the assignment",
+    "bidder",
+    "contractor",
+    "assignment",
+    "procurement",
 ]
 
 KEYWORDS_EXCLUSION = [
+    # Français
     "manuel utilisateur",
-    "user manual",
     "catalogue",
     "rapport d'avancement",
-    "progress report",
     "certificat",
-    "datasheet",
     "fiche technique",
     "plan de montage",
-    "règlement",
-    "regulation",
+    "règlement intérieur",      # plus spécifique que "règlement" seul
+    # Anglais
+    "user manual",
+    "progress report",
+    "datasheet",
+    "technical specification",
+    "product manual",
 ]
 
 # Poids des catégories
