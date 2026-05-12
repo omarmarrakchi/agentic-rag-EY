@@ -1,0 +1,14 @@
+# ── Extraction PDF ───────────────────────────────────────────────────────────
+pymupdf==1.25.5          # extraction texte natif + détection images
+pdfplumber==0.11.4       # extraction tableaux
+
+# ── OCR (PDFs scannés) ───────────────────────────────────────────────────────
+pytesseract==0.3.13      # wrapper Python pour Tesseract OCR
+Pillow==11.2.1           # manipulation d'images pour l'OCR
+
+# ── LLM local (Ollama) ───────────────────────────────────────────────────────
+ollama==0.4.8            # client Python officiel Ollama
+
+# ── Utilitaires ─────────────────────────────────────────────────────────────
+tqdm==4.67.1             # barre de progression
+colorlog==6.9.0          # logs colorés en terminal

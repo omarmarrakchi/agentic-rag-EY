@@ -1,0 +1,27 @@
+# Environnement virtuel Python
+backend/venv/
+venv/
+.env
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+backend/logs/
+*.log
+
+# Données traitées (trop lourdes pour git)
+data/filtered_tdrs/
+data/rejected/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
