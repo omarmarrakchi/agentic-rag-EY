@@ -117,3 +117,10 @@ PARENT_CHUNK_SIZE     = 800   # caractères par parent chunk
 PARENT_CHUNK_OVERLAP  = 100   # chevauchement entre parents
 CHILD_CHUNK_SIZE      = 200   # caractères par child chunk
 CHILD_CHUNK_OVERLAP   = 20    # chevauchement entre children
+
+# ── Étape 3 — Indexation vectorielle ────────────────────────────────────────
+VECTOR_DB_DIR         = ROOT_DIR / "data" / "vector_db"
+EMBEDDING_MODEL       = "BAAI/bge-m3"
+EMBEDDING_BATCH_SIZE  = 32    # chunks encodés en parallèle
+COLLECTION_CHILDREN   = "tdr_children"   # collection ChromaDB des children
+COLLECTION_PARENTS    = "tdr_parents"    # collection ChromaDB des parents

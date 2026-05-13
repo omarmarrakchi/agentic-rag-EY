@@ -12,3 +12,7 @@ ollama==0.4.8            # client Python officiel Ollama
 # ── Utilitaires ─────────────────────────────────────────────────────────────
 tqdm==4.67.1             # barre de progression
 colorlog==6.9.0          # logs colorés en terminal
+
+# ── Étape 3 — Embeddings + Base vectorielle ──────────────────────────────────
+sentence-transformers==3.4.1  # modèle BAAI/bge-m3 pour les embeddings
+chromadb==1.0.8               # base vectorielle locale

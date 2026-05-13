@@ -18,6 +18,7 @@ backend/logs/
 data/filtered_tdrs/
 data/rejected/
 data/chunks/
+data/vector_db/
 
 # OS
 .DS_Store
