@@ -31,6 +31,7 @@ backend/
     step1_filter/    ← filtrage et classification des PDFs
     step2_chunking/  ← extraction, métadonnées et chunking des TdRs
     step3_indexing/  ← embeddings et indexation dans ChromaDB
+    step4_agent/     ← agent RAG ReAct (LangGraph + qwen2.5:14b)
   logs/              ← rapports JSON des runs
 
 frontend/            ← UI React (à venir)
@@ -351,6 +352,60 @@ Question utilisateur
 
 ---
 
+## Étape 4 — Agent RAG (ReAct + LangGraph)
+
+### Problème
+
+Avec la base vectorielle prête, il faut un agent capable de raisonner, de choisir quoi chercher, et de synthétiser les résultats pour répondre à des questions en langage naturel.
+
+### Approche : pattern ReAct avec LangGraph
+
+L'agent suit une boucle **Thought → Action → Observation** jusqu'à avoir assez d'informations :
+
+```
+Question : "Quel profil de consultant pour une mission ERP ?"
+│
+▼
+[Agent réfléchit]
+├── Action   : search_child_chunks("profil consultant ERP qualifications")
+├── Observation : 3 chunks pertinents trouvés
+├── Action   : retrieve_parent_chunks("TDR_ERP_p3, TDR_ERP_p5")
+├── Observation : 2 × 800 chars de contexte complet
+└── Réponse finale : synthèse structurée avec sources citées
+```
+
+**Pourquoi LangGraph ?**
+- Gère le cycle ReAct (boucle Thought/Action/Observation) nativement
+- Mémoire de conversation intégrée (`MemorySaver`) — l'agent se souvient des échanges précédents
+- Streaming token par token — la réponse s'affiche en temps réel
+
+### Fichiers concernés
+
+| Fichier | Rôle |
+|---|---|
+| [backend/pipeline/step4_agent/tools.py](backend/pipeline/step4_agent/tools.py) | Les 2 outils ReAct : `search_child_chunks` et `retrieve_parent_chunks` |
+| [backend/pipeline/step4_agent/agent.py](backend/pipeline/step4_agent/agent.py) | Graph LangGraph + prompt système + mémoire de conversation |
+| [backend/pipeline/step4_agent/agent_pipeline.py](backend/pipeline/step4_agent/agent_pipeline.py) | Interface `ask()` pour l'API FastAPI (mode non-streaming) |
+| [backend/run_agent.py](backend/run_agent.py) | CLI interactive avec streaming token par token |
+
+### Les 2 outils de l'agent
+
+| Outil | Description |
+|---|---|
+| `search_child_chunks(query)` | Encode la query avec BGE-M3, cherche les 3 children les plus proches dans ChromaDB |
+| `retrieve_parent_chunks(ids)` | Récupère les parents par ID — retourne 800 chars de contexte complet par parent |
+
+### Décisions techniques et alternatives considérées
+
+| Décision | Choix retenu | Alternative écartée | Raison |
+|---|---|---|---|
+| Modèle LLM | `qwen2.5:14b` | `qwen2.5:7b` | Meilleur raisonnement pour le tool calling, temps acceptable avec streaming |
+| Orchestration | LangGraph `create_react_agent` | LangChain AgentExecutor | LangGraph gère mieux la mémoire et le streaming |
+| Streaming | Token par token via `agent.stream()` | Attendre la réponse complète | Élimine la latence perçue |
+| Query rewriting | Supprimé | Appel LLM dédié | Ajoutait ~5 sec de latence sans gain significatif avec qwen2.5:14b |
+
+---
+
 ## Installation
 
 ### Prérequis
@@ -393,17 +448,18 @@ Au premier lancement de `run_indexing.py`, le modèle (~2.3 Go) se télécharge 
 python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3'); print('BGE-M3 OK')"
 ```
 
-### 5. Télécharger le modèle Ollama
+### 5. Télécharger les modèles Ollama
 
 ```bash
-ollama pull qwen2.5:7b
+ollama pull qwen2.5:7b    # utilisé pour le filtrage et le chunking
+ollama pull qwen2.5:14b   # utilisé pour l'agent RAG
 ```
 
 Vérifier qu'Ollama tourne :
 
 ```bash
 ollama list
-# qwen2.5:7b doit apparaître dans la liste
+# qwen2.5:7b et qwen2.5:14b doivent apparaître dans la liste
 ```
 
 ### 6. Placer les PDFs bruts
@@ -489,6 +545,41 @@ INFO     Terminé — Children indexés : 9793 | Parents stockés : 3970
 INFO     Rapport sauvegardé : backend/logs/indexing_report_YYYYMMDD_HHMMSS.json
 ```
 
+### Étape 4 — Agent RAG (mode interactif)
+
+Depuis le dossier `backend/` (avec le venv activé et Ollama en cours d'exécution) :
+
+```bash
+python run_agent.py
+```
+
+L'agent :
+1. Charge `qwen2.5:14b` via Ollama
+2. Attend une question en français ou en anglais
+3. Recherche les chunks pertinents dans ChromaDB (`search_child_chunks`)
+4. Récupère le contexte complet des parents (`retrieve_parent_chunks`)
+5. Affiche la réponse en streaming (token par token)
+6. Conserve la mémoire de la conversation pour les questions suivantes
+
+**Sortie attendue :**
+```
+============================================================
+   Agent RAG — Termes de Référence EY
+============================================================
+Tapez votre question en français ou en anglais.
+Tapez 'exit' pour quitter.
+
+Question : Quel est le profil recherché pour une mission ERP ?
+
+Réponse :
+[Recherche en cours...]
+D'après le TdR analysé (Source : TDR-ERP.pdf), le profil recherché
+est un expert en systèmes ERP avec au moins 10 ans d'expérience...
+
+Sources consultées : TDR-ERP.pdf
+────────────────────────────────────────────────────────────
+```
+
 ### Configuration
 
 Tous les paramètres sont centralisés dans [backend/config/settings.py](backend/config/settings.py) :
@@ -513,6 +604,10 @@ EMBEDDING_MODEL       = "BAAI/bge-m3"
 EMBEDDING_BATCH_SIZE  = 32    # chunks encodés par batch
 COLLECTION_CHILDREN   = "tdr_children"
 COLLECTION_PARENTS    = "tdr_parents"
+
+# Étape 4 — Agent RAG
+AGENT_MODEL           = "qwen2.5:14b"  # LLM pour le raisonnement
+AGENT_TOP_K           = 3              # nombre de children retournés par recherche
 ```
 
 ---
@@ -522,7 +617,7 @@ COLLECTION_PARENTS    = "tdr_parents"
 - [x] **Étape 1** — Filtrage des PDFs (scoring + LLM)
 - [x] **Étape 2** — Extraction et chunking des TdRs filtrés
 - [x] **Étape 3** — Indexation vectorielle (embeddings + base vectorielle)
-- [ ] **Étape 4** — Agent RAG (LangGraph, pattern ReAct)
+- [x] **Étape 4** — Agent RAG (LangGraph, pattern ReAct)
 - [ ] **Étape 5** — API FastAPI + UI React
 - [ ] **Étape 6** — Containerisation Docker Compose
 
@@ -551,14 +646,19 @@ agentic-rag-ey/
 │   │   │   ├── text_cleaner.py        ← nettoyage texte
 │   │   │   ├── chunker.py             ← découpage parent-child
 │   │   │   └── chunking_pipeline.py   ← orchestrateur
-│   │   └── step3_indexing/
-│   │       ├── embedder.py            ← BGE-M3, encodage par batch
-│   │       ├── vector_store.py        ← interface ChromaDB
-│   │       └── indexing_pipeline.py   ← orchestrateur
+│   │   ├── step3_indexing/
+│   │   │   ├── embedder.py            ← BGE-M3, encodage par batch
+│   │   │   ├── vector_store.py        ← interface ChromaDB
+│   │   │   └── indexing_pipeline.py   ← orchestrateur
+│   │   └── step4_agent/
+│   │       ├── tools.py               ← outils ReAct (search + retrieve)
+│   │       ├── agent.py               ← graph LangGraph + mémoire
+│   │       └── agent_pipeline.py      ← interface ask() pour l'API
 │   ├── logs/              ← rapports JSON (non versionnés)
 │   ├── requirements.txt
 │   ├── run_filter.py      ← point d'entrée étape 1
 │   ├── run_chunking.py    ← point d'entrée étape 2
-│   └── run_indexing.py    ← point d'entrée étape 3
+│   ├── run_indexing.py    ← point d'entrée étape 3
+│   └── run_agent.py       ← point d'entrée étape 4 (CLI interactive)
 └── frontend/              ← UI React (à venir)
 ```
