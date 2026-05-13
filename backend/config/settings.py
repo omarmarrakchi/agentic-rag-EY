@@ -126,5 +126,5 @@ COLLECTION_CHILDREN   = "tdr_children"   # collection ChromaDB des children
 COLLECTION_PARENTS    = "tdr_parents"    # collection ChromaDB des parents
 
 # ── Étape 4 — Agent RAG ─────────────────────────────────────────────────────
-AGENT_MODEL           = "qwen2.5:7b"    # modèle LLM pour le raisonnement
-AGENT_TOP_K           = 5               # nombre de children retournés par recherche
+AGENT_MODEL           = "qwen2.5:14b"   # modèle LLM pour le raisonnement
+AGENT_TOP_K           = 3               # nombre de children retournés par recherche
