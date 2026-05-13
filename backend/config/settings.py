@@ -110,3 +110,10 @@ KEYWORDS_EXCLUSION = [
 WEIGHT_STRONG    =  3
 WEIGHT_WEAK      =  1
 WEIGHT_EXCLUSION = -3
+
+# ── Étape 2 — Chunking ──────────────────────────────────────────────────────
+CHUNKS_DIR            = ROOT_DIR / "data" / "chunks"
+PARENT_CHUNK_SIZE     = 800   # caractères par parent chunk
+PARENT_CHUNK_OVERLAP  = 100   # chevauchement entre parents
+CHILD_CHUNK_SIZE      = 200   # caractères par child chunk
+CHILD_CHUNK_OVERLAP   = 20    # chevauchement entre children

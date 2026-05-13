@@ -17,6 +17,7 @@ backend/logs/
 # Données traitées (trop lourdes pour git)
 data/filtered_tdrs/
 data/rejected/
+data/chunks/
 
 # OS
 .DS_Store
