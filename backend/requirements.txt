@@ -16,3 +16,8 @@ colorlog==6.9.0          # logs colorés en terminal
 # ── Étape 3 — Embeddings + Base vectorielle ──────────────────────────────────
 sentence-transformers==3.4.1  # modèle BAAI/bge-m3 pour les embeddings
 chromadb==1.0.8               # base vectorielle locale
+
+# ── Étape 4 — Agent RAG ──────────────────────────────────────────────────────
+langchain==1.3.0              # framework agent + outils
+langchain-ollama==1.1.0       # connecteur LangChain ↔ Ollama
+langgraph==1.2.0              # orchestration du graph ReAct + mémoire

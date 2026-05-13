@@ -124,3 +124,7 @@ EMBEDDING_MODEL       = "BAAI/bge-m3"
 EMBEDDING_BATCH_SIZE  = 32    # chunks encodés en parallèle
 COLLECTION_CHILDREN   = "tdr_children"   # collection ChromaDB des children
 COLLECTION_PARENTS    = "tdr_parents"    # collection ChromaDB des parents
+
+# ── Étape 4 — Agent RAG ─────────────────────────────────────────────────────
+AGENT_MODEL           = "qwen2.5:7b"    # modèle LLM pour le raisonnement
+AGENT_TOP_K           = 5               # nombre de children retournés par recherche
