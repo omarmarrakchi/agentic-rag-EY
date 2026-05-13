@@ -22,6 +22,7 @@ data/
   filtered_tdrs/     ← TdRs confirmés (sortie Step 1)
   rejected/          ← fichiers non-TdR (sortie Step 1)
   chunks/            ← chunks JSON par TdR (sortie Step 2)
+  vector_db/         ← base vectorielle ChromaDB (sortie Step 3)
 
 backend/
   config/
@@ -29,6 +30,7 @@ backend/
   pipeline/
     step1_filter/    ← filtrage et classification des PDFs
     step2_chunking/  ← extraction, métadonnées et chunking des TdRs
+    step3_indexing/  ← embeddings et indexation dans ChromaDB
   logs/              ← rapports JSON des runs
 
 frontend/            ← UI React (à venir)
@@ -249,6 +251,106 @@ Rapport détaillé : `backend/logs/chunking_report_20260512_172549.json`
 
 ---
 
+## Étape 3 — Indexation vectorielle
+
+### Problème
+
+On dispose de 19 586 child chunks. Pour trouver les plus pertinents en réponse à une question en moins d'une seconde, une comparaison mot à mot est trop lente et ne comprend pas le sens. Solution : transformer chaque chunk en vecteur numérique (**embedding**) et stocker ces vecteurs dans une base spécialisée.
+
+### Approche : BGE-M3 + ChromaDB
+
+```
+data/chunks/*.json  (19 586 children + 3 970 parents)
+        │
+        ▼
+[BGE-M3] → transforme chaque child en vecteur de 1 024 dimensions
+   "profil consultant ERP"       → [0.12, 0.87, 0.34, ...]
+   "livrables attendus rapport"  → [0.45, 0.21, 0.93, ...]
+        │
+        ▼
+[ChromaDB]
+   collection tdr_children ← children + embeddings + métadonnées
+   collection tdr_parents  ← parents + texte (récupérés par ID)
+        │
+        ▼
+data/vector_db/  ← base prête pour les requêtes de l'agent
+```
+
+### Modèle d'embedding : `BAAI/bge-m3`
+
+| Critère | Détail |
+|---|---|
+| **Performance** | Meilleur modèle open-source multilingue (2024-2025) |
+| **Langues** | 100+ langues dont français et anglais |
+| **Dimensions** | 1 024 |
+| **Taille** | ~2.3 Go |
+| **Particularité** | Supporte la recherche dense (sémantique) + sparse (mots-clés) simultanément |
+
+### Fichiers concernés
+
+| Fichier | Rôle |
+|---|---|
+| [backend/pipeline/step3_indexing/embedder.py](backend/pipeline/step3_indexing/embedder.py) | Charge BGE-M3 (singleton) et encode les textes par batch |
+| [backend/pipeline/step3_indexing/vector_store.py](backend/pipeline/step3_indexing/vector_store.py) | Interface ChromaDB — insertion par batch et recherche par similarité |
+| [backend/pipeline/step3_indexing/indexing_pipeline.py](backend/pipeline/step3_indexing/indexing_pipeline.py) | Orchestrateur — lit `data/chunks/`, encode, insère dans ChromaDB |
+| [backend/run_indexing.py](backend/run_indexing.py) | Point d'entrée CLI |
+
+### Détail des sous-étapes
+
+#### 1. Encodage (`embedder.py`)
+
+- Charge `BAAI/bge-m3` une seule fois (singleton) pour éviter de le recharger à chaque appel
+- Encode les children par batch de `EMBEDDING_BATCH_SIZE=32`
+- Normalisation L2 activée (`normalize_embeddings=True`) — améliore la similarité cosine
+
+#### 2. Stockage dans ChromaDB (`vector_store.py`)
+
+Deux collections distinctes :
+
+| Collection | Contenu | Usage |
+|---|---|---|
+| `tdr_children` | Texte + embedding + métadonnées | Recherche vectorielle par similarité |
+| `tdr_parents` | Texte + métadonnées (sans embedding) | Récupération par ID pour le contexte LLM |
+
+Les insertions sont faites par batch de 2 000 pour respecter la limite interne de ChromaDB (5 461 max).
+
+Les métadonnées stockées par child : `parent_id`, `source`, `titre`, `organisation`, `duree`, `lieu`, `objectifs`, `livrables`.
+
+### Comment fonctionne la recherche (aperçu étape 4)
+
+```
+Question utilisateur
+      │
+      ▼ encode avec BGE-M3
+[vecteur requête]
+      │
+      ▼ similarité cosine dans tdr_children
+[Top-5 children les plus proches]
+      │  chacun porte un parent_id
+      ▼ récupération dans tdr_parents
+[Texte complet des parents — 800 chars de contexte]
+      │
+      ▼
+[LLM formule la réponse]
+```
+
+### Décisions techniques et alternatives considérées
+
+| Décision | Choix retenu | Alternative écartée | Raison |
+|---|---|---|---|
+| Modèle d'embedding | `BAAI/bge-m3` | `paraphrase-multilingual-MiniLM-L12-v2` | BGE-M3 est nettement plus performant sur les documents techniques multilingues |
+| Base vectorielle | ChromaDB (local) | FAISS, Qdrant | ChromaDB est simple, local, supporte les filtres sur métadonnées sans serveur |
+| Indexation | Children uniquement | Children + parents | Les parents n'ont pas besoin d'embedding — ils sont récupérés par ID |
+| Batch ChromaDB | 2 000 | Tout en une fois | ChromaDB a une limite interne de 5 461 éléments par upsert |
+
+### Résultats (Run final)
+
+- **9 793 children** indexés avec embeddings dans `tdr_children`
+- **3 970 parents** stockés dans `tdr_parents`
+- Base vectorielle disponible dans `data/vector_db/`
+
+---
+
 ## Installation
 
 ### Prérequis
@@ -283,7 +385,15 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Télécharger le modèle Ollama
+### 4. Télécharger le modèle BGE-M3
+
+Au premier lancement de `run_indexing.py`, le modèle (~2.3 Go) se télécharge automatiquement depuis HuggingFace. Pour le pré-télécharger :
+
+```bash
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3'); print('BGE-M3 OK')"
+```
+
+### 5. Télécharger le modèle Ollama
 
 ```bash
 ollama pull qwen2.5:7b
@@ -296,7 +406,7 @@ ollama list
 # qwen2.5:7b doit apparaître dans la liste
 ```
 
-### 5. Placer les PDFs bruts
+### 6. Placer les PDFs bruts
 
 Copier les PDFs à analyser dans `data/raw_tdrs/`.
 
@@ -353,6 +463,32 @@ INFO     Terminé — Succès: 58 | Erreurs: 0 | Parents: 3970 | Children: 19586
 INFO     Rapport sauvegardé : backend/logs/chunking_report_YYYYMMDD_HHMMSS.json
 ```
 
+### Étape 3 — Indexation vectorielle
+
+Depuis le dossier `backend/` (avec le venv activé) :
+
+```bash
+python run_indexing.py
+```
+
+Le pipeline :
+1. Lit tous les JSON de `data/chunks/`
+2. Encode les children avec BGE-M3 par batch de 32
+3. Insère les children (avec embeddings) dans ChromaDB — collection `tdr_children`
+4. Insère les parents (sans embeddings) dans ChromaDB — collection `tdr_parents`
+5. Sauvegarde un rapport JSON dans `backend/logs/`
+
+**Sortie attendue :**
+```
+INFO     58 fichiers JSON trouvés dans data/chunks
+INFO     9793 children | 3970 parents à indexer
+INFO     Encodage des children avec BGE-M3 (peut prendre plusieurs minutes)...
+Encodage: 100%|████████████| 306/306 [batches]
+INFO     Encodage terminé — 9793 vecteurs de 1024 dimensions
+INFO     Terminé — Children indexés : 9793 | Parents stockés : 3970
+INFO     Rapport sauvegardé : backend/logs/indexing_report_YYYYMMDD_HHMMSS.json
+```
+
 ### Configuration
 
 Tous les paramètres sont centralisés dans [backend/config/settings.py](backend/config/settings.py) :
@@ -371,6 +507,12 @@ PARENT_CHUNK_SIZE     = 800   # caractères par parent chunk
 PARENT_CHUNK_OVERLAP  = 100   # chevauchement entre parents
 CHILD_CHUNK_SIZE      = 200   # caractères par child chunk
 CHILD_CHUNK_OVERLAP   = 20    # chevauchement entre children
+
+# Étape 3 — Indexation vectorielle
+EMBEDDING_MODEL       = "BAAI/bge-m3"
+EMBEDDING_BATCH_SIZE  = 32    # chunks encodés par batch
+COLLECTION_CHILDREN   = "tdr_children"
+COLLECTION_PARENTS    = "tdr_parents"
 ```
 
 ---
@@ -379,7 +521,7 @@ CHILD_CHUNK_OVERLAP   = 20    # chevauchement entre children
 
 - [x] **Étape 1** — Filtrage des PDFs (scoring + LLM)
 - [x] **Étape 2** — Extraction et chunking des TdRs filtrés
-- [ ] **Étape 3** — Indexation vectorielle (embeddings + base vectorielle)
+- [x] **Étape 3** — Indexation vectorielle (embeddings + base vectorielle)
 - [ ] **Étape 4** — Agent RAG (LangGraph, pattern ReAct)
 - [ ] **Étape 5** — API FastAPI + UI React
 - [ ] **Étape 6** — Containerisation Docker Compose
@@ -403,15 +545,20 @@ agentic-rag-ey/
 │   │   │   ├── keyword_scorer.py      ← scoring mots-clés
 │   │   │   ├── llm_classifier.py      ← classification Ollama
 │   │   │   └── filter_pipeline.py     ← orchestrateur
-│   │   └── step2_chunking/
-│   │       ├── text_extractor.py      ← extraction texte complet
-│   │       ├── metadata_extractor.py  ← attributs TdR via Ollama
-│   │       ├── text_cleaner.py        ← nettoyage texte
-│   │       ├── chunker.py             ← découpage parent-child
-│   │       └── chunking_pipeline.py   ← orchestrateur
+│   │   ├── step2_chunking/
+│   │   │   ├── text_extractor.py      ← extraction texte complet
+│   │   │   ├── metadata_extractor.py  ← attributs TdR via Ollama
+│   │   │   ├── text_cleaner.py        ← nettoyage texte
+│   │   │   ├── chunker.py             ← découpage parent-child
+│   │   │   └── chunking_pipeline.py   ← orchestrateur
+│   │   └── step3_indexing/
+│   │       ├── embedder.py            ← BGE-M3, encodage par batch
+│   │       ├── vector_store.py        ← interface ChromaDB
+│   │       └── indexing_pipeline.py   ← orchestrateur
 │   ├── logs/              ← rapports JSON (non versionnés)
 │   ├── requirements.txt
 │   ├── run_filter.py      ← point d'entrée étape 1
-│   └── run_chunking.py    ← point d'entrée étape 2
+│   ├── run_chunking.py    ← point d'entrée étape 2
+│   └── run_indexing.py    ← point d'entrée étape 3
 └── frontend/              ← UI React (à venir)
 ```
