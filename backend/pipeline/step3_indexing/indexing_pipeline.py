@@ -39,6 +39,39 @@ def _setup_logger() -> logging.Logger:
     return logger
 
 
+def _build_contextual_text(
+    child_text: str,
+    parent_hint: str,
+    doc_meta: dict,
+    source: str,
+) -> str:
+    """
+    Construit le texte enrichi envoyé à BGE-M3 pour l'encodage.
+    Le texte stocké dans ChromaDB reste propre (sans ce header).
+
+    Format :
+      [Document: fichier.pdf | Titre: ... | Organisation: ...]
+      <début du parent — contexte de section>
+      <texte du child>
+    """
+    parts = [f"Document: {source}"]
+
+    titre = (doc_meta.get("titre") or "").strip()
+    if titre:
+        parts.append(f"Titre: {titre}")
+
+    organisation = (doc_meta.get("organisation") or "").strip()
+    if organisation:
+        parts.append(f"Organisation: {organisation}")
+
+    header = " | ".join(parts)
+
+    # Première ligne du parent = indice de section
+    section_hint = parent_hint[:120].replace("\n", " ").strip()
+
+    return f"[{header}]\n{section_hint}\n{child_text}"
+
+
 def _build_child_metadata(child: dict, doc_meta: dict, source: str) -> dict:
     """Construit les métadonnées d'un child à stocker dans ChromaDB."""
     return {
@@ -83,6 +116,7 @@ def run() -> dict:
 
     # ── Collecte de tous les children et parents ──────────────────────────
     all_child_ids, all_child_texts, all_child_metas = [], [], []
+    all_child_texts_for_encoding = []   # textes enrichis (headers contextuels)
     all_parent_ids, all_parent_texts, all_parent_metas = [], [], []
 
     for json_path in tqdm(chunk_files, desc="Chargement chunks", unit="fichier"):
@@ -92,10 +126,22 @@ def run() -> dict:
         source   = doc["source"]
         doc_meta = doc.get("metadata", {})
 
+        # Index parent_id → début du texte parent (indice de section)
+        parent_hints = {
+            p["chunk_id"]: p["text"]
+            for p in doc["parents"]
+        }
+
         for child in doc["children"]:
             all_child_ids.append(child["chunk_id"])
-            all_child_texts.append(child["text"])
+            all_child_texts.append(child["text"])   # stocké propre dans ChromaDB
             all_child_metas.append(_build_child_metadata(child, doc_meta, source))
+
+            # Texte enrichi pour l'encodage uniquement
+            hint = parent_hints.get(child["parent_id"], "")
+            all_child_texts_for_encoding.append(
+                _build_contextual_text(child["text"], hint, doc_meta, source)
+            )
 
         for parent in doc["parents"]:
             all_parent_ids.append(parent["chunk_id"])
@@ -105,15 +151,15 @@ def run() -> dict:
     logger.info(f"{len(all_child_ids)} children | {len(all_parent_ids)} parents à indexer")
 
     # ── Encodage des children par batch ───────────────────────────────────
-    logger.info("Encodage des children avec BGE-M3 (peut prendre plusieurs minutes)...")
+    logger.info("Encodage des children avec BGE-M3 + headers contextuels...")
     all_embeddings = []
 
     for i in tqdm(
-        range(0, len(all_child_texts), EMBEDDING_BATCH_SIZE),
+        range(0, len(all_child_texts_for_encoding), EMBEDDING_BATCH_SIZE),
         desc="Encodage",
         unit="batch",
     ):
-        batch = all_child_texts[i : i + EMBEDDING_BATCH_SIZE]
+        batch = all_child_texts_for_encoding[i : i + EMBEDDING_BATCH_SIZE]
         all_embeddings.extend(encode(batch))
 
     logger.info(f"Encodage terminé — {len(all_embeddings)} vecteurs de 1024 dimensions")
