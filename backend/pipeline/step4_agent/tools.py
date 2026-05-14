@@ -1,16 +1,20 @@
 """
 Outils ReAct de l'agent RAG.
 
-L'agent dispose de deux outils :
-  - search_child_chunks   : cherche les passages pertinents dans ChromaDB
-  - retrieve_parent_chunks: récupère le contexte complet d'un ou plusieurs parents
+Pipeline de recherche :
+  1. BGE-M3 (vector search) → AGENT_TOP_K=6 candidats
+  2. Filtre score >= AGENT_SCORE_THRESHOLD
+  3. Cross-encoder reranker → re-trie par pertinence réelle
+  4. Retourne RERANKER_TOP_K=3 meilleurs résultats
+  5. retrieve_parent_chunks → contexte complet pour le LLM
 """
 
 from langchain_core.tools import tool
 
-from config.settings import AGENT_TOP_K, AGENT_SCORE_THRESHOLD
+from config.settings import AGENT_TOP_K, AGENT_SCORE_THRESHOLD, RERANKER_TOP_K
 from pipeline.step3_indexing.embedder import encode
 from pipeline.step3_indexing.vector_store import search_children, get_parents_by_ids
+from pipeline.step4_agent.reranker import rerank
 
 
 @tool
@@ -26,16 +30,24 @@ def search_child_chunks(query: str) -> str:
     if not results:
         return "Aucun résultat trouvé pour cette requête."
 
+    # Filtre les résultats trop faibles avant le reranking
     filtered = [r for r in results if r["score"] >= AGENT_SCORE_THRESHOLD]
     if not filtered:
         best = results[0]["score"]
-        return f"Résultats trouvés mais scores trop faibles (meilleur: {best:.2f}). Essaie avec des mots-clés différents."
+        return (
+            f"Résultats trouvés mais scores trop faibles (meilleur: {best:.2f}). "
+            "Essaie avec des mots-clés différents."
+        )
+
+    # Reranking : cross-encoder re-trie par pertinence réelle
+    reranked = rerank(query, filtered)
+    top = reranked[:RERANKER_TOP_K]
 
     output = []
-    for r in filtered:
+    for r in top:
         output.append(
             f"[Source: {r['metadata'].get('source', '')} | "
-            f"Score: {r['score']:.2f} | "
+            f"Score: {r['rerank_score']:.2f} | "
             f"Parent ID: {r['metadata'].get('parent_id', '')}]\n"
             f"{r['text']}"
         )
