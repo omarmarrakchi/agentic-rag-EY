@@ -7,6 +7,8 @@ Deux collections :
 
 Les métadonnées listes (objectifs, livrables) sont converties en chaînes
 car ChromaDB n'accepte que str, int, float ou bool comme valeurs de métadonnées.
+
+HNSW ef_search=64 (défaut=10) — meilleur rappel au moment de la recherche.
 """
 
 from typing import Optional
@@ -17,6 +19,13 @@ from pathlib import Path
 from config.settings import VECTOR_DB_DIR, COLLECTION_CHILDREN, COLLECTION_PARENTS
 
 _client: Optional[chromadb.PersistentClient] = None
+
+# ef_search : nombre de candidats explorés pendant la recherche HNSW.
+# Plus élevé = meilleur rappel, légèrement plus lent.
+# 64 est un bon compromis (défaut ChromaDB = 10).
+_HNSW_EF_SEARCH = 64
+
+_CHROMA_BATCH_SIZE = 2000
 
 
 def _get_client() -> chromadb.PersistentClient:
@@ -43,7 +52,12 @@ def _sanitize_metadata(meta: dict) -> dict:
 def get_children_collection() -> chromadb.Collection:
     return _get_client().get_or_create_collection(
         name=COLLECTION_CHILDREN,
-        metadata={"hnsw:space": "cosine"},  # similarité cosine pour BGE-M3
+        metadata={
+            "hnsw:space": "cosine",
+            "hnsw:M": 16,
+            "hnsw:construction_ef": 100,
+            "hnsw:search_ef": _HNSW_EF_SEARCH,
+        },
     )
 
 
@@ -51,7 +65,18 @@ def get_parents_collection() -> chromadb.Collection:
     return _get_client().get_or_create_collection(name=COLLECTION_PARENTS)
 
 
-_CHROMA_BATCH_SIZE = 2000  # bien en dessous de la limite ChromaDB (5461)
+def clear_collections() -> None:
+    """
+    Supprime et recrée les deux collections.
+    À appeler avant une re-indexation complète pour éviter
+    les chunks obsolètes (anciens IDs qui n'existent plus).
+    """
+    client = _get_client()
+    for name in [COLLECTION_CHILDREN, COLLECTION_PARENTS]:
+        try:
+            client.delete_collection(name)
+        except Exception:
+            pass
 
 
 def _upsert_in_batches(collection, ids, embeddings, documents, metadatas) -> None:
@@ -107,7 +132,7 @@ def search_children(query_embedding: list[float], k: int = 5) -> list[dict]:
         hits.append({
             "chunk_id": results["ids"][0][i],
             "text":     results["documents"][0][i],
-            "score":    1 - results["distances"][0][i],  # distance → similarité
+            "score":    1 - results["distances"][0][i],
             "metadata": results["metadatas"][0][i],
         })
     return hits

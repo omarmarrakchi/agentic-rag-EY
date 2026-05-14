@@ -17,10 +17,12 @@ from tqdm import tqdm
 
 from config.settings import CHUNKS_DIR, LOGS_DIR, EMBEDDING_BATCH_SIZE
 from pipeline.step3_indexing.embedder import encode
+from pipeline.step3_indexing.embedder import get_device
 from pipeline.step3_indexing.vector_store import (
     insert_children,
     insert_parents,
     collection_stats,
+    clear_collections,
 )
 
 
@@ -69,6 +71,12 @@ def run() -> dict:
     """
     logger = _setup_logger()
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    device = get_device()
+    logger.info(f"Device d'encodage : {device.upper()}")
+
+    logger.info("Suppression des anciennes collections ChromaDB...")
+    clear_collections()
 
     chunk_files = sorted(CHUNKS_DIR.glob("*.json"))
     logger.info(f"{len(chunk_files)} fichiers JSON trouvés dans {CHUNKS_DIR}")

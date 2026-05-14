@@ -1,14 +1,22 @@
 """
 Découpe un texte en chunks hiérarchiques parent-child.
 
-Parent chunk : grande fenêtre (~800 chars) — contexte riche pour le LLM.
-Child chunk  : petite fenêtre (~200 chars) — précis pour la recherche vectorielle.
+Améliorations vs version précédente :
+  - RecursiveCharacterTextSplitter : coupe aux paragraphes/phrases,
+    jamais en milieu de mot.
+  - Blocs [TABLEAU]...[/TABLEAU] protégés : jamais fragmentés.
+  - Détection des titres de section : traités comme frontières naturelles.
 
-Chaque child référence son parent via parent_id.
-Chaque parent liste ses children via le champ children[].
+Parent chunk : grande fenêtre (~1500 chars) — contexte riche pour le LLM.
+Child chunk  : petite fenêtre (~400 chars) — précis pour la recherche vectorielle.
 """
 
 import re
+
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from config.settings import (
     PARENT_CHUNK_SIZE,
@@ -17,32 +25,49 @@ from config.settings import (
     CHILD_CHUNK_OVERLAP,
 )
 
+# Séparateurs par ordre de priorité : paragraphe > ligne > phrase > mot
+_SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
+
+# Regex de détection des titres de section courants dans les TdRs
+_SECTION_RE = re.compile(
+    r"(?m)^("
+    r"\d+[\.\)]\s+[A-ZÀÂÉÈÊËÎÏÔÙÛÜ\w]"        # "1. Objectifs" / "2) Profil"
+    r"|[IVX]+\.\s+[A-ZÀÂÉÈÊËÎÏÔÙÛÜ]"           # "I. Introduction"
+    r"|[A-ZÀÂÉÈÊËÎÏÔÙÛÜ]{3}[A-ZÀÂÉÈÊËÎÏÔÙÛÜ\s]{2,}$"  # "PROFIL DU CONSULTANT"
+    r"|(?:Article|Section|Chapitre|Annexe)\s+\d+"  # "Article 1"
+    r")"
+)
+
 
 def _sanitize_name(filename_stem: str) -> str:
-    """Transforme le nom de fichier en identifiant valide (sans espaces ni caractères spéciaux)."""
     sanitized = re.sub(r"[^\w]", "_", filename_stem)
-    return sanitized[:40]  # limite la longueur des IDs
+    return sanitized[:40]
 
 
-def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    """
-    Découpe un texte en morceaux de taille chunk_size avec un chevauchement overlap.
-    Le chevauchement évite de couper une phrase entre deux chunks consécutifs.
-    """
-    if not text:
-        return []
+def _protect_tables(text: str) -> tuple[str, dict]:
+    """Remplace les blocs [TABLEAU] par des clés pour éviter leur découpage."""
+    placeholders = {}
+    counter = [0]
 
-    chunks = []
-    start = 0
+    def replace(m):
+        key = f"\n\n__TABLE_{counter[0]}__\n\n"
+        placeholders[f"__TABLE_{counter[0]}__"] = m.group(0)
+        counter[0] += 1
+        return key
 
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        if end >= len(text):
-            break
-        start = end - overlap
+    processed = re.sub(r"\[TABLEAU\].*?\[/TABLEAU\]", replace, text, flags=re.DOTALL)
+    return processed, placeholders
 
-    return chunks
+
+def _restore_tables(text: str, placeholders: dict) -> str:
+    for key, value in placeholders.items():
+        text = text.replace(key, value)
+    return text
+
+
+def _mark_sections(text: str) -> str:
+    """Insère un double saut de ligne avant chaque titre de section."""
+    return _SECTION_RE.sub(lambda m: f"\n\n{m.group()}", text)
 
 
 def create_chunks(text: str, doc_name: str) -> dict:
@@ -54,24 +79,41 @@ def create_chunks(text: str, doc_name: str) -> dict:
         "parents" : liste de dicts parent,
         "children": liste de dicts child,
       }
-
-    Structure d'un parent :
-      { chunk_id, type="parent", text, children: [child_id, ...] }
-
-    Structure d'un child :
-      { chunk_id, type="child", text, parent_id }
     """
     safe_name = _sanitize_name(doc_name)
-    parent_texts = _split_text(text, PARENT_CHUNK_SIZE, PARENT_CHUNK_OVERLAP)
+
+    # 1. Protège les tableaux
+    processed, placeholders = _protect_tables(text)
+
+    # 2. Marque les frontières de section
+    processed = _mark_sections(processed)
+
+    # 3. Découpe en parents
+    parent_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=PARENT_CHUNK_SIZE,
+        chunk_overlap=PARENT_CHUNK_OVERLAP,
+        separators=_SEPARATORS,
+        length_function=len,
+    )
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHILD_CHUNK_SIZE,
+        chunk_overlap=CHILD_CHUNK_OVERLAP,
+        separators=_SEPARATORS,
+        length_function=len,
+    )
+
+    parent_texts = parent_splitter.split_text(processed)
 
     parents = []
     children = []
 
     for p_idx, p_text in enumerate(parent_texts):
+        # Restaure les tableaux dans le parent
+        p_text = _restore_tables(p_text, placeholders)
         p_id = f"{safe_name}_p{p_idx}"
         child_ids = []
 
-        child_texts = _split_text(p_text, CHILD_CHUNK_SIZE, CHILD_CHUNK_OVERLAP)
+        child_texts = child_splitter.split_text(p_text)
         for c_idx, c_text in enumerate(child_texts):
             c_id = f"{safe_name}_c{p_idx}_{c_idx}"
             children.append({

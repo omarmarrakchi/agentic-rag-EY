@@ -113,18 +113,19 @@ WEIGHT_EXCLUSION = -3
 
 # ── Étape 2 — Chunking ──────────────────────────────────────────────────────
 CHUNKS_DIR            = ROOT_DIR / "data" / "chunks"
-PARENT_CHUNK_SIZE     = 800   # caractères par parent chunk
-PARENT_CHUNK_OVERLAP  = 100   # chevauchement entre parents
-CHILD_CHUNK_SIZE      = 200   # caractères par child chunk
-CHILD_CHUNK_OVERLAP   = 20    # chevauchement entre children
+PARENT_CHUNK_SIZE     = 1500  # caractères par parent chunk
+PARENT_CHUNK_OVERLAP  = 200   # chevauchement entre parents
+CHILD_CHUNK_SIZE      = 400   # caractères par child chunk
+CHILD_CHUNK_OVERLAP   = 80    # chevauchement entre children
 
 # ── Étape 3 — Indexation vectorielle ────────────────────────────────────────
 VECTOR_DB_DIR         = ROOT_DIR / "data" / "vector_db"
 EMBEDDING_MODEL       = "BAAI/bge-m3"
-EMBEDDING_BATCH_SIZE  = 32    # chunks encodés en parallèle
+EMBEDDING_BATCH_SIZE  = 64    # chunks encodés en parallèle (GPU)
 COLLECTION_CHILDREN   = "tdr_children"   # collection ChromaDB des children
 COLLECTION_PARENTS    = "tdr_parents"    # collection ChromaDB des parents
 
 # ── Étape 4 — Agent RAG ─────────────────────────────────────────────────────
 AGENT_MODEL           = "qwen2.5:14b"   # modèle LLM pour le raisonnement
-AGENT_TOP_K           = 3               # nombre de children retournés par recherche
+AGENT_TOP_K           = 6               # nombre de children retournés par recherche
+AGENT_SCORE_THRESHOLD = 0.45            # score minimum pour accepter un résultat

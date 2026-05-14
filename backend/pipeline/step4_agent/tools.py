@@ -8,7 +8,7 @@ L'agent dispose de deux outils :
 
 from langchain_core.tools import tool
 
-from config.settings import AGENT_TOP_K
+from config.settings import AGENT_TOP_K, AGENT_SCORE_THRESHOLD
 from pipeline.step3_indexing.embedder import encode
 from pipeline.step3_indexing.vector_store import search_children, get_parents_by_ids
 
@@ -26,8 +26,13 @@ def search_child_chunks(query: str) -> str:
     if not results:
         return "Aucun résultat trouvé pour cette requête."
 
+    filtered = [r for r in results if r["score"] >= AGENT_SCORE_THRESHOLD]
+    if not filtered:
+        best = results[0]["score"]
+        return f"Résultats trouvés mais scores trop faibles (meilleur: {best:.2f}). Essaie avec des mots-clés différents."
+
     output = []
-    for r in results:
+    for r in filtered:
         output.append(
             f"[Source: {r['metadata'].get('source', '')} | "
             f"Score: {r['score']:.2f} | "
