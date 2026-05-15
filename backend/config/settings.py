@@ -126,8 +126,8 @@ COLLECTION_CHILDREN   = "tdr_children"   # collection ChromaDB des children
 COLLECTION_PARENTS    = "tdr_parents"    # collection ChromaDB des parents
 
 # ── Étape 4 — Agent RAG ─────────────────────────────────────────────────────
-AGENT_MODEL           = "qwen2.5:14b"   # modèle LLM pour le raisonnement
-AGENT_TOP_K           = 6               # nombre de children récupérés par BGE-M3
+AGENT_MODEL           = "qwen2.5:14b-instruct-q3_K_M"   # modèle LLM pour le raisonnement
+AGENT_TOP_K           = 10              # nombre de children récupérés par BGE-M3
 AGENT_SCORE_THRESHOLD = 0.45            # score minimum avant reranking
 RERANKER_MODEL        = "BAAI/bge-reranker-base"  # cross-encoder multilingue
-RERANKER_TOP_K        = 3               # nombre de résultats conservés après reranking
+RERANKER_TOP_K        = 6               # nombre de résultats conservés après reranking

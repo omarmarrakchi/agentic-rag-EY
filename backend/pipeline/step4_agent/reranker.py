@@ -14,19 +14,25 @@ Modèle : BAAI/bge-reranker-base
 
 from typing import Optional
 
-from sentence_transformers import CrossEncoder
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from config.settings import RERANKER_MODEL
 
-_model: Optional[CrossEncoder] = None
+_tokenizer: Optional[AutoTokenizer] = None
+_model: Optional[AutoModelForSequenceClassification] = None
 
 
-def _get_model() -> CrossEncoder:
-    global _model
+def _get_model():
+    global _tokenizer, _model
     if _model is None:
-        # CPU uniquement — GPU réservé à Ollama
-        _model = CrossEncoder(RERANKER_MODEL, device="cpu")
-    return _model
+        _tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL)
+        # dtype=float32 évite l'erreur "meta tensor" avec PyTorch 2.6
+        _model = AutoModelForSequenceClassification.from_pretrained(
+            RERANKER_MODEL, dtype=torch.float32
+        )
+        _model.eval()
+    return _tokenizer, _model
 
 
 def rerank(query: str, results: list[dict]) -> list[dict]:
@@ -43,10 +49,22 @@ def rerank(query: str, results: list[dict]) -> list[dict]:
     if not results:
         return results
 
-    model = _get_model()
+    tokenizer, model = _get_model()
 
     pairs = [[query, r["text"]] for r in results]
-    scores = model.predict(pairs, show_progress_bar=False)
+
+    with torch.no_grad():
+        inputs = tokenizer(
+            pairs,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
+        )
+        scores = model(**inputs).logits.squeeze(-1).tolist()
+
+    if isinstance(scores, float):
+        scores = [scores]
 
     for i, r in enumerate(results):
         r["rerank_score"] = float(scores[i])
