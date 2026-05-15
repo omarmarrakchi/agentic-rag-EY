@@ -10,7 +10,7 @@ Construire un pipeline complet capable de :
 1. **Filtrer** automatiquement un corpus de ~100 PDFs pour n'en garder que les TdRs réels
 2. **Extraire et indexer** le contenu de ces TdRs dans une base vectorielle
 3. **Répondre** à des questions en langage naturel via un agent RAG (architecture ReAct)
-4. **Exposer** l'interface via une API FastAPI et une UI React
+4. **Exposer** l'interface via une API FastAPI et une UI React avec mode Chat et mode Recherche
 
 ---
 
@@ -26,15 +26,18 @@ data/
 
 backend/
   config/
-    settings.py      ← paramètres centralisés (seuils, chemins, modèles)
+    settings.py      ← paramètres centralisés (seuils, chemins, modèles, provider)
   pipeline/
     step1_filter/    ← filtrage et classification des PDFs
     step2_chunking/  ← extraction, métadonnées et chunking des TdRs
     step3_indexing/  ← embeddings et indexation dans ChromaDB
-    step4_agent/     ← agent RAG ReAct (LangGraph + qwen2.5:14b)
+    step4_agent/     ← agent RAG ReAct (LangGraph + Ollama/OpenAI)
+  api/
+    routes/          ← endpoints FastAPI (ask, search, provider, health)
   logs/              ← rapports JSON des runs
 
-frontend/            ← UI React (à venir)
+frontend/            ← UI React (Chat + Recherche)
+.env                 ← clés API (ignoré par git)
 ```
 
 ---
@@ -92,8 +95,6 @@ Chaque texte extrait est comparé à trois listes de mots-clés :
 | **Faible** (`KEYWORDS_WEAK`) | "consultant", "livrables", "méthodologie", "deliverables", "procurement" | +1 |
 | **Exclusion** (`KEYWORDS_EXCLUSION`) | "manuel utilisateur", "catalogue", "rapport d'avancement", "règlement intérieur" | -3 |
 
-**Normalisation des accents** : le texte et les mots-clés sont normalisés avec `unicodedata` avant comparaison, ce qui permet de matcher les sorties OCR imparfaites (ex : "TERMES DE REFERENCES" → "termes de reference" matche "termes de référence").
-
 **Seuils de décision** :
 - Score ≥ 5 → **TdR confirmé** (pas besoin du LLM)
 - Score ≤ 0 → **Rejeté** (pas besoin du LLM)
@@ -101,33 +102,19 @@ Chaque texte extrait est comparé à trois listes de mots-clés :
 
 #### 3. Classification LLM (`llm_classifier.py`)
 
-Pour les cas ambigus, les 500 premiers caractères du texte sont envoyés au modèle `qwen2.5:7b` via Ollama (serveur local). Le modèle répond en JSON strict :
+Pour les cas ambigus, les 500 premiers caractères du texte sont envoyés au modèle `qwen2.5:14b-instruct-q3_K_M` via Ollama. Le modèle répond en JSON strict :
 
 ```json
 {"is_tdr": true, "reason": "Le document décrit une mission de consultance avec livrables et profil requis"}
 ```
-
-**Cas particulier — PDF scanné sans texte** : si l'OCR a échoué (texte vide), le nom du fichier est transmis au LLM comme contexte de secours.
-
-### Décisions techniques et alternatives considérées
-
-| Décision | Choix retenu | Alternative écartée | Raison |
-|---|---|---|---|
-| LLM local vs API | Ollama (`qwen2.5:7b`) en local | OpenAI GPT-4 | Confidentialité des données, pas de coût API, fonctionne hors ligne |
-| LLM pour tous les fichiers | Non — seulement les ambigus | Passer tous les PDFs au LLM | Latence : ~2 s/fichier × 100 = 3 min vs ~10 s pour les cas certains |
-| OCR | Tesseract v5 + pytesseract | PyMuPDF OCR intégré | Tesseract donne de meilleurs résultats sur les PDFs scannés en fra+eng |
-| Seuil "TdR confirmé" | Score ≥ 5 (soit 2 mots forts) | Seuil plus bas | Évite les faux positifs sur des documents qui contiennent "consultant" par hasard |
-| Mots d'exclusion | Termes très spécifiques ("règlement intérieur") | Termes génériques ("règlement") | "règlement" apparaît dans les clauses de marchés publics légitimes et pénalisait des vrais TdRs |
 
 ### Résultats (Run final)
 
 Sur 100 PDFs bruts :
 - **58 TdRs confirmés** → `data/filtered_tdrs/`
 - **41 rejetés** → `data/rejected/`
-- **1 erreur** (fichier corrompu `TR-2012-006_TDR_WP73.pdf`)
+- **1 erreur** (fichier corrompu)
 - Ollama sollicité pour **28 cas ambigus**
-
-Rapport détaillé : `backend/logs/filter_report_20260512_161530.json`
 
 ---
 
@@ -135,51 +122,52 @@ Rapport détaillé : `backend/logs/filter_report_20260512_161530.json`
 
 ### Problème
 
-Pour indexer les TdRs dans une base vectorielle, on ne peut pas encoder un document entier en un seul vecteur — les modèles d'embeddings ont une limite de ~512 tokens. Il faut découper chaque TdR en morceaux, mais de façon intelligente pour ne pas perdre le contexte lors des réponses.
+Pour indexer les TdRs dans une base vectorielle, on ne peut pas encoder un document entier en un seul vecteur. Il faut découper chaque TdR en morceaux intelligents, extraire les métadonnées structurées, et préserver la cohérence sémantique des sections.
 
-### Approche : chunking hiérarchique parent-child
-
-Chaque TdR est découpé en deux niveaux :
+### Approche : pymupdf4llm + chunking par sections + extraction LLM intelligente
 
 ```
-Document complet (ex: TDR-ERP.pdf, 15 000 chars)
-│
-├── Parent chunk 0  (chars 0–800)     ← contexte riche pour le LLM
-│     ├── Child 0_0  (chars 0–200)    ← petit chunk précis pour la recherche
-│     ├── Child 0_1  (chars 180–380)
-│     └── Child 0_2  (chars 360–560)
-│
-├── Parent chunk 1  (chars 700–1500)  ← overlap de 100 chars avec parent 0
-│     ├── Child 1_0  ...
-│     └── ...
-└── ...
+PDF
+ ↓ pymupdf4llm.to_markdown()     → Markdown structuré (titres ##, ###, tableaux)
+ ↓ _extract_smart()              → sélectionne les sections clés (~7 000 chars)
+ ↓ LLM (Ollama ou OpenAI)        → extrait 9 champs de métadonnées en JSON
+ ↓ clean_text()                  → normalise les sauts de ligne
+ ↓ _split_by_sections()          → découpe aux titres Markdown
+ ↓ RecursiveCharacterTextSplitter → parents ~1 500 chars, children ~400 chars
+ ↓ Sauvegarde JSON               → un fichier par TdR dans data/chunks/
 ```
-
-**Pourquoi deux niveaux ?**
-- Les **children** (200 chars) sont précis → utilisés pour la **recherche vectorielle**
-- Les **parents** (800 chars) sont riches → fournis au **LLM pour formuler la réponse**
-- L'overlap entre chunks évite de couper une phrase entre deux morceaux
 
 ### Fichiers concernés
 
 | Fichier | Rôle |
 |---|---|
-| [backend/pipeline/step2_chunking/text_extractor.py](backend/pipeline/step2_chunking/text_extractor.py) | Extrait le texte complet du PDF (sans limite de caractères) |
-| [backend/pipeline/step2_chunking/metadata_extractor.py](backend/pipeline/step2_chunking/metadata_extractor.py) | Extrait les attributs structurés du TdR via Ollama (3 500 premiers chars) |
-| [backend/pipeline/step2_chunking/text_cleaner.py](backend/pipeline/step2_chunking/text_cleaner.py) | Nettoie le texte (espaces, artefacts OCR, mots coupés) |
-| [backend/pipeline/step2_chunking/chunker.py](backend/pipeline/step2_chunking/chunker.py) | Découpe en parents (800 chars) puis en children (200 chars) avec overlap |
-| [backend/pipeline/step2_chunking/chunking_pipeline.py](backend/pipeline/step2_chunking/chunking_pipeline.py) | Orchestrateur — lit `filtered_tdrs/`, écrit dans `data/chunks/` |
+| [backend/pipeline/step2_chunking/text_extractor.py](backend/pipeline/step2_chunking/text_extractor.py) | Extraction 3 niveaux : pymupdf4llm → PyMuPDF → OCR Tesseract |
+| [backend/pipeline/step2_chunking/metadata_extractor.py](backend/pipeline/step2_chunking/metadata_extractor.py) | Extraction intelligente des métadonnées via LLM (Ollama ou OpenAI) |
+| [backend/pipeline/step2_chunking/text_cleaner.py](backend/pipeline/step2_chunking/text_cleaner.py) | Normalisation légère du Markdown |
+| [backend/pipeline/step2_chunking/chunker.py](backend/pipeline/step2_chunking/chunker.py) | Chunking par sections Markdown + subdivision parent-child |
+| [backend/pipeline/step2_chunking/chunking_pipeline.py](backend/pipeline/step2_chunking/chunking_pipeline.py) | Orchestrateur principal |
 | [backend/run_chunking.py](backend/run_chunking.py) | Point d'entrée CLI |
 
 ### Détail des sous-étapes
 
-#### 1. Extraction texte complet (`text_extractor.py`)
+#### 1. Extraction texte (`text_extractor.py`) — 3 niveaux
 
-Même logique que l'étape 1 (natif vs OCR), mais sans limite de caractères — le texte entier du document est extrait pour ne rien perdre lors de l'indexation.
+| Niveau | Outil | Cas d'usage |
+|---|---|---|
+| 1 | `pymupdf4llm.to_markdown()` | PDF natif → Markdown avec titres et sections |
+| 2 | PyMuPDF `page.get_text()` | Fallback texte brut si pymupdf4llm échoue |
+| 3 | Tesseract OCR | PDFs scannés sans couche texte (ex: `TDR-ERP.pdf`) |
 
-#### 2. Extraction des métadonnées (`metadata_extractor.py`)
+**Avantage de pymupdf4llm** : produit un Markdown structuré avec `# ## ###` pour les titres — exploité par le chunker pour respecter les frontières sémantiques du document.
 
-Les 3 500 premiers caractères sont envoyés à Ollama une seule fois par document. Le LLM retourne un JSON structuré :
+#### 2. Extraction métadonnées intelligente (`metadata_extractor.py`)
+
+Au lieu d'envoyer le document entier, `_extract_smart()` sélectionne :
+- Les **2 000 premiers caractères** → titre, organisation, contexte
+- Les **sections dont le titre contient un mot-clé** métadonnée : "objectif", "livrable", "profil", "budget", "durée", "lieu", "date"...
+- Cap total à **7 000 chars** — soit ~65% de réduction vs full-doc, pour ~95% de qualité
+
+Le LLM retourne un JSON structuré avec 9 champs :
 
 ```json
 {
@@ -190,65 +178,42 @@ Les 3 500 premiers caractères sont envoyés à Ollama une seule fois par docume
   "profil_consultant": "Expert ERP, 10 ans d'expérience, maîtrise SAP",
   "duree": "6 mois",
   "lieu": "Rabat, Maroc",
-  "budget": null,
-  "date_limite": null
+  "budget": "50 000 USD",
+  "date_limite": "30 juin 2025"
 }
 ```
 
-Ces métadonnées sont attachées à chaque chunk et serviront de **filtres** dans la base vectorielle (ex : *"montre-moi les TdRs de l'UNICEF de moins de 3 mois"*).
+**Provider configurable** : si `AGENT_PROVIDER = "openai"`, gpt-4o est utilisé pour l'extraction (plus rapide, meilleure qualité) ; sinon qwen2.5:14b local.
 
-#### 3. Nettoyage (`text_cleaner.py`)
+#### 3. Chunking par sections (`chunker.py`)
 
-- Supprime les caractères de contrôle et tirets mous
-- Normalise les espaces et tabulations
-- Pour les PDFs scannés : recolle les mots coupés en fin de ligne (`consul-\ntant` → `consultant`)
-- Limite les sauts de ligne consécutifs à 2
+Contrairement au chunking à taille fixe, le découpage se fait d'abord aux **frontières sémantiques** du document (titres Markdown) :
 
-#### 4. Chunking parent-child (`chunker.py`)
+```
+## Objectifs de la mission        ← parent 0
+  ├── child 0_0 (~400 chars)
+  └── child 0_1 (~400 chars)
+
+## Profil du consultant           ← parent 1
+  ├── child 1_0 (~400 chars)
+  └── child 1_1 (~400 chars)
+```
 
 | Paramètre | Valeur | Raison |
 |---|---|---|
-| `PARENT_CHUNK_SIZE` | 800 chars | ~150 tokens — contexte suffisant pour le LLM |
-| `PARENT_CHUNK_OVERLAP` | 100 chars | Évite de couper une phrase entre deux parents |
-| `CHILD_CHUNK_SIZE` | 200 chars | ~40 tokens — précis pour la recherche vectorielle |
-| `CHILD_CHUNK_OVERLAP` | 20 chars | Légère continuité entre children |
-
-### Format de sortie (un JSON par TdR)
-
-```json
-{
-  "source": "TDR-ERP.pdf",
-  "is_scanned": false,
-  "page_count": 8,
-  "total_chars": 15240,
-  "metadata": { "titre": "...", "organisation": "...", ... },
-  "parents": [
-    { "chunk_id": "TDR_ERP_p0", "type": "parent", "text": "...", "children": ["TDR_ERP_c0_0", ...] }
-  ],
-  "children": [
-    { "chunk_id": "TDR_ERP_c0_0", "type": "child", "text": "...", "parent_id": "TDR_ERP_p0" }
-  ]
-}
-```
+| `PARENT_CHUNK_SIZE` | 1 500 chars | Section logique complète pour le LLM |
+| `PARENT_CHUNK_OVERLAP` | 200 chars | Continuité entre sections |
+| `CHILD_CHUNK_SIZE` | 400 chars | Précis pour la recherche vectorielle |
+| `CHILD_CHUNK_OVERLAP` | 80 chars | Légère continuité entre children |
 
 ### Décisions techniques et alternatives considérées
 
 | Décision | Choix retenu | Alternative écartée | Raison |
 |---|---|---|---|
-| Stratégie de chunking | Parent-child hiérarchique | Chunks fixes taille unique | Permet recherche précise (child) + réponse contextualisée (parent) |
-| Taille parent | 800 chars | 1 500 chars | Reste dans la fenêtre du LLM même pour des modèles légers |
-| Extraction métadonnées | LLM sur 3 500 premiers chars | Regex/heuristiques | Les TdRs ont des structures trop variées pour des patterns fixes |
-| Stockage intermédiaire | JSON par document dans `data/chunks/` | Directement en base vectorielle | Permet de déboguer et rejouer l'étape 3 sans refaire l'OCR |
-
-### Résultats (Run final)
-
-Sur 58 TdRs filtrés :
-- **116 fichiers traités** (PDFs + variantes .PDF)
-- **0 erreur**
-- **3 970 parent chunks** créés
-- **19 586 child chunks** créés
-
-Rapport détaillé : `backend/logs/chunking_report_20260512_172549.json`
+| Extraction PDF | pymupdf4llm (Markdown) | Docling | Docling trop lent (~10-20x), pymupdf4llm donne 90% des bénéfices |
+| Chunking | Par sections Markdown | Taille fixe | Respecte les frontières sémantiques, tableaux intacts |
+| Métadonnées | Sections clés ~7 000 chars | Full document 20 000 chars | 65% moins de tokens, même qualité |
+| Fallback scannés | Tesseract OCR | Ignorer le fichier | Récupère les TdRs scannés au lieu de les perdre |
 
 ---
 
@@ -256,26 +221,52 @@ Rapport détaillé : `backend/logs/chunking_report_20260512_172549.json`
 
 ### Problème
 
-On dispose de 19 586 child chunks. Pour trouver les plus pertinents en réponse à une question en moins d'une seconde, une comparaison mot à mot est trop lente et ne comprend pas le sens. Solution : transformer chaque chunk en vecteur numérique (**embedding**) et stocker ces vecteurs dans une base spécialisée.
+On dispose de milliers de child chunks. Pour trouver les plus pertinents en réponse à une question en moins d'une seconde, on combine deux approches complémentaires : recherche sémantique (vecteurs) et recherche lexicale (mots exacts).
 
-### Approche : BGE-M3 + ChromaDB
+### Approche : BGE-M3 + ChromaDB + BM25 (Recherche Hybride)
 
 ```
-data/chunks/*.json  (19 586 children + 3 970 parents)
+data/chunks/*.json
         │
         ▼
-[BGE-M3] → transforme chaque child en vecteur de 1 024 dimensions
-   "profil consultant ERP"       → [0.12, 0.87, 0.34, ...]
-   "livrables attendus rapport"  → [0.45, 0.21, 0.93, ...]
+[BGE-M3] → vecteur 1 024 dims par child chunk
         │
         ▼
 [ChromaDB]
-   collection tdr_children ← children + embeddings + métadonnées
-   collection tdr_parents  ← parents + texte (récupérés par ID)
+   tdr_children ← children + embeddings + métadonnées (HNSW ef_search=64)
+   tdr_parents  ← parents + texte (récupérés par ID)
         │
         ▼
-data/vector_db/  ← base prête pour les requêtes de l'agent
+[Index BM25] ← construit en RAM au démarrage depuis ChromaDB
+
+── Requête ──────────────────────────────────────────────────────────────────
+Question utilisateur
+        │
+   ┌────┴────────────────────────┐
+   │ BGE-M3 (sémantique)         │  → top K résultats
+   │ BM25 (mots exacts)          │  → top K résultats
+   └────┬────────────────────────┘
+        │
+   RRF (Reciprocal Rank Fusion)  → fusionne les deux classements
+        │
+   Cross-encoder reranker        → re-trie par pertinence réelle
+        │
+   Top résultats → agent
 ```
+
+**Avantage de la recherche hybride** :
+- BGE-M3 trouve les résultats sémantiquement proches ("consultant informatique" ~ "expert IT")
+- BM25 trouve les termes exacts ("USAID", "50 000 USD", noms propres)
+- RRF favorise les documents bien classés dans les DEUX recherches
+
+### Fichiers concernés
+
+| Fichier | Rôle |
+|---|---|
+| [backend/pipeline/step3_indexing/embedder.py](backend/pipeline/step3_indexing/embedder.py) | BGE-M3 singleton, encodage par batch, gestion GPU/CPU |
+| [backend/pipeline/step3_indexing/vector_store.py](backend/pipeline/step3_indexing/vector_store.py) | Interface ChromaDB + index BM25 + hybrid_search() + fonctions metadata |
+| [backend/pipeline/step3_indexing/indexing_pipeline.py](backend/pipeline/step3_indexing/indexing_pipeline.py) | Orchestrateur — lit chunks, encode, insère dans ChromaDB |
+| [backend/run_indexing.py](backend/run_indexing.py) | Point d'entrée CLI |
 
 ### Modèle d'embedding : `BAAI/bge-m3`
 
@@ -285,70 +276,15 @@ data/vector_db/  ← base prête pour les requêtes de l'agent
 | **Langues** | 100+ langues dont français et anglais |
 | **Dimensions** | 1 024 |
 | **Taille** | ~2.3 Go |
-| **Particularité** | Supporte la recherche dense (sémantique) + sparse (mots-clés) simultanément |
-
-### Fichiers concernés
-
-| Fichier | Rôle |
-|---|---|
-| [backend/pipeline/step3_indexing/embedder.py](backend/pipeline/step3_indexing/embedder.py) | Charge BGE-M3 (singleton) et encode les textes par batch |
-| [backend/pipeline/step3_indexing/vector_store.py](backend/pipeline/step3_indexing/vector_store.py) | Interface ChromaDB — insertion par batch et recherche par similarité |
-| [backend/pipeline/step3_indexing/indexing_pipeline.py](backend/pipeline/step3_indexing/indexing_pipeline.py) | Orchestrateur — lit `data/chunks/`, encode, insère dans ChromaDB |
-| [backend/run_indexing.py](backend/run_indexing.py) | Point d'entrée CLI |
-
-### Détail des sous-étapes
-
-#### 1. Encodage (`embedder.py`)
-
-- Charge `BAAI/bge-m3` une seule fois (singleton) pour éviter de le recharger à chaque appel
-- Encode les children par batch de `EMBEDDING_BATCH_SIZE=32`
-- Normalisation L2 activée (`normalize_embeddings=True`) — améliore la similarité cosine
-
-#### 2. Stockage dans ChromaDB (`vector_store.py`)
-
-Deux collections distinctes :
-
-| Collection | Contenu | Usage |
-|---|---|---|
-| `tdr_children` | Texte + embedding + métadonnées | Recherche vectorielle par similarité |
-| `tdr_parents` | Texte + métadonnées (sans embedding) | Récupération par ID pour le contexte LLM |
-
-Les insertions sont faites par batch de 2 000 pour respecter la limite interne de ChromaDB (5 461 max).
-
-Les métadonnées stockées par child : `parent_id`, `source`, `titre`, `organisation`, `duree`, `lieu`, `objectifs`, `livrables`.
-
-### Comment fonctionne la recherche (aperçu étape 4)
-
-```
-Question utilisateur
-      │
-      ▼ encode avec BGE-M3
-[vecteur requête]
-      │
-      ▼ similarité cosine dans tdr_children
-[Top-5 children les plus proches]
-      │  chacun porte un parent_id
-      ▼ récupération dans tdr_parents
-[Texte complet des parents — 800 chars de contexte]
-      │
-      ▼
-[LLM formule la réponse]
-```
 
 ### Décisions techniques et alternatives considérées
 
 | Décision | Choix retenu | Alternative écartée | Raison |
 |---|---|---|---|
-| Modèle d'embedding | `BAAI/bge-m3` | `paraphrase-multilingual-MiniLM-L12-v2` | BGE-M3 est nettement plus performant sur les documents techniques multilingues |
-| Base vectorielle | ChromaDB (local) | FAISS, Qdrant | ChromaDB est simple, local, supporte les filtres sur métadonnées sans serveur |
-| Indexation | Children uniquement | Children + parents | Les parents n'ont pas besoin d'embedding — ils sont récupérés par ID |
-| Batch ChromaDB | 2 000 | Tout en une fois | ChromaDB a une limite interne de 5 461 éléments par upsert |
-
-### Résultats (Run final)
-
-- **9 793 children** indexés avec embeddings dans `tdr_children`
-- **3 970 parents** stockés dans `tdr_parents`
-- Base vectorielle disponible dans `data/vector_db/`
+| Recherche | Hybride BM25 + vectorielle | Vectorielle seule | BM25 couvre les termes exacts manqués par la similarité sémantique |
+| Fusion | RRF (Reciprocal Rank Fusion) | Somme pondérée des scores | RRF est robuste et ne nécessite pas de calibration des poids |
+| Base vectorielle | ChromaDB (local) | FAISS, Qdrant | Simple, local, supporte filtres sur métadonnées |
+| HNSW ef_search | 64 (vs défaut 10) | Valeur par défaut | Meilleur rappel au prix d'une légère latence supplémentaire |
 
 ---
 
@@ -356,53 +292,190 @@ Question utilisateur
 
 ### Problème
 
-Avec la base vectorielle prête, il faut un agent capable de raisonner, de choisir quoi chercher, et de synthétiser les résultats pour répondre à des questions en langage naturel.
+Avec la base vectorielle prête, il faut un agent capable de raisonner, de choisir le bon outil selon la question, et de synthétiser les résultats pour répondre en langage naturel.
 
-### Approche : pattern ReAct avec LangGraph
+### Approche : pattern ReAct avec LangGraph + 6 outils spécialisés
 
-L'agent suit une boucle **Thought → Action → Observation** jusqu'à avoir assez d'informations :
+L'agent suit une boucle **Thought → Action → Observation** :
 
 ```
 Question : "Quel profil de consultant pour une mission ERP ?"
 │
-▼
-[Agent réfléchit]
+▼ [Agent choisit l'outil approprié]
 ├── Action   : search_child_chunks("profil consultant ERP qualifications")
-├── Observation : 3 chunks pertinents trouvés
+├── Observation : chunks pertinents trouvés (hybride BM25 + vectoriel + reranking)
 ├── Action   : retrieve_parent_chunks("TDR_ERP_p3, TDR_ERP_p5")
-├── Observation : 2 × 800 chars de contexte complet
+├── Observation : contexte complet (1 500 chars par parent)
 └── Réponse finale : synthèse structurée avec sources citées
 ```
 
-**Pourquoi LangGraph ?**
-- Gère le cycle ReAct (boucle Thought/Action/Observation) nativement
-- Mémoire de conversation intégrée (`MemorySaver`) — l'agent se souvient des échanges précédents
-- Streaming token par token — la réponse s'affiche en temps réel
+### Les 6 outils de l'agent
+
+| Outil | Description | Cas d'usage |
+|---|---|---|
+| `search_child_chunks(query)` | Recherche hybride BM25+vectorielle + reranking cross-encoder | Questions thématiques, qualifications, livrables |
+| `retrieve_parent_chunks(ids)` | Récupère le contexte complet par ID | Après search, pour enrichir le contexte LLM |
+| `count_documents()` | Nombre total de TdRs dans la base | "Combien de TdRs ?" |
+| `list_all_documents()` | Liste tous les TdRs avec métadonnées | "Liste tous les TdRs disponibles" |
+| `filter_documents(filters)` | Filtre par organisation, lieu, budget, durée | "TdRs de l'UNICEF au Maroc" |
+| `get_document_details(source)` | Fiche complète d'un TdR spécifique | "Détails du TdR-ERP" |
+
+### Provider LLM configurable
+
+L'agent supporte deux providers sans redémarrer le serveur :
+
+| Provider | Modèle | Avantages |
+|---|---|---|
+| **Ollama** (local) | qwen2.5:14b-instruct-q3_K_M | Gratuit, confidentiel, hors ligne |
+| **OpenAI** (API) | gpt-4o | Meilleure qualité, plus rapide, analyses plus riches |
+
+Le switch se fait via l'API (`POST /api/provider`) ou le bouton toggle dans l'interface React.
+
+### Prompts adaptés par modèle
+
+Chaque provider dispose d'un prompt système optimisé pour ses capacités :
+
+- **Prompt Ollama** : instructions courtes et explicites, ordre strict des outils, règles anti-hallucination renforcées
+- **Prompt GPT-4o** : instructions riches, analyses comparatives, tableaux Markdown, minimum 4 recherches, extraction de chiffres exacts (budgets, durées, dates)
 
 ### Fichiers concernés
 
 | Fichier | Rôle |
 |---|---|
-| [backend/pipeline/step4_agent/tools.py](backend/pipeline/step4_agent/tools.py) | Les 2 outils ReAct : `search_child_chunks` et `retrieve_parent_chunks` |
-| [backend/pipeline/step4_agent/agent.py](backend/pipeline/step4_agent/agent.py) | Graph LangGraph + prompt système + mémoire de conversation |
-| [backend/pipeline/step4_agent/agent_pipeline.py](backend/pipeline/step4_agent/agent_pipeline.py) | Interface `ask()` pour l'API FastAPI (mode non-streaming) |
+| [backend/pipeline/step4_agent/tools.py](backend/pipeline/step4_agent/tools.py) | Les 6 outils LangChain de l'agent |
+| [backend/pipeline/step4_agent/agent.py](backend/pipeline/step4_agent/agent.py) | Graph LangGraph + prompts duaux + provider factory + mémoire |
+| [backend/pipeline/step4_agent/reranker.py](backend/pipeline/step4_agent/reranker.py) | Cross-encoder BAAI/bge-reranker-base pour le reranking |
+| [backend/pipeline/step4_agent/agent_pipeline.py](backend/pipeline/step4_agent/agent_pipeline.py) | Interface `ask()` pour l'API FastAPI |
 | [backend/run_agent.py](backend/run_agent.py) | CLI interactive avec streaming token par token |
-
-### Les 2 outils de l'agent
-
-| Outil | Description |
-|---|---|
-| `search_child_chunks(query)` | Encode la query avec BGE-M3, cherche les 3 children les plus proches dans ChromaDB |
-| `retrieve_parent_chunks(ids)` | Récupère les parents par ID — retourne 800 chars de contexte complet par parent |
 
 ### Décisions techniques et alternatives considérées
 
 | Décision | Choix retenu | Alternative écartée | Raison |
 |---|---|---|---|
-| Modèle LLM | `qwen2.5:14b` | `qwen2.5:7b` | Meilleur raisonnement pour le tool calling, temps acceptable avec streaming |
-| Orchestration | LangGraph `create_react_agent` | LangChain AgentExecutor | LangGraph gère mieux la mémoire et le streaming |
-| Streaming | Token par token via `agent.stream()` | Attendre la réponse complète | Élimine la latence perçue |
-| Query rewriting | Supprimé | Appel LLM dédié | Ajoutait ~5 sec de latence sans gain significatif avec qwen2.5:14b |
+| LLM local | qwen2.5:14b-instruct-q3_K_M | qwen2.5:7b | Meilleur raisonnement, tient dans 6 Go VRAM avec quantization |
+| Reranking | BAAI/bge-reranker-base (transformers) | CrossEncoder sentence-transformers | Évite le bug meta tensor de PyTorch 2.6 |
+| Tool calling | SequentialChatOllama (force séquentiel) | Parallèle natif | qwen2.5 tente des appels parallèles qui cassent LangGraph |
+| Provider switch | `_settings.AGENT_PROVIDER` dynamique | Redémarrage serveur | Bascule à chaud sans interruption de service |
+
+---
+
+## Étape 5 — API FastAPI + Interface React
+
+### Problème
+
+Le pipeline RAG est opérationnel en CLI, mais il faut une interface web accessible aux analystes EY sans compétences techniques. L'interface doit proposer deux modes : conversation intelligente et recherche directe avec filtres.
+
+### Architecture
+
+```
+React Frontend (Vite)                FastAPI Backend
+─────────────────────                ───────────────
+Mode Chat                            POST /api/ask
+  └── Question utilisateur    ──SSE→ Streaming token par token
+  └── Réponse en temps réel         (LangGraph ReAct agent)
+
+Mode Recherche                       POST /api/search
+  └── Mots-clés + filtres    ──────→ BGE-M3 + BM25 + reranking
+  └── Grille de résultats            Retourne TdRResult avec métadonnées
+
+Toggle Ollama/GPT-4o                 GET/POST /api/provider
+  └── Bouton switch header   ──────→ Switch provider à chaud
+```
+
+### Fonctionnalités de l'interface
+
+#### Mode Chat
+- Conversation en langage naturel avec l'agent RAG
+- **Streaming SSE** : les tokens s'affichent en temps réel (pas d'attente)
+- Indicateur de recherche en cours ("Recherche dans la base TdR...")
+- Mémoire de conversation par session (questions de suivi possibles)
+- Support français et anglais
+
+#### Mode Recherche
+- Barre de recherche par mots-clés (optionnelle si filtre rempli)
+- Filtres : **Organisation / Bailleur** et **Lieu / Pays / Région**
+- Grille de résultats avec cartes : score de pertinence, titre, organisation, lieu, durée, budget, date limite
+- Score coloré : vert (≥70%), orange (≥50%), gris (<50%)
+- Modal détail : profil consultant, objectifs, livrables, missions similaires
+
+#### Toggle Provider
+- Bouton switch dans le header : **Ollama ⟵⟶ GPT-4o**
+- Bascule instantanée sans rechargement de page
+- État synchronisé avec le backend au chargement
+
+### Fichiers concernés
+
+| Fichier | Rôle |
+|---|---|
+| [backend/api/main.py](backend/api/main.py) | Application FastAPI + middleware CORS |
+| [backend/api/routes/ask.py](backend/api/routes/ask.py) | `POST /api/ask` — streaming SSE de l'agent |
+| [backend/api/routes/search.py](backend/api/routes/search.py) | `POST /api/search` — recherche directe avec filtres |
+| [backend/api/routes/provider.py](backend/api/routes/provider.py) | `GET/POST /api/provider` — switch Ollama/OpenAI |
+| [backend/api/routes/health.py](backend/api/routes/health.py) | `GET /api/health` — liveness check |
+| [backend/run_api.py](backend/run_api.py) | Point d'entrée — lance uvicorn |
+| [frontend/src/App.jsx](frontend/src/App.jsx) | Composant React principal (Chat + Recherche + Provider toggle) |
+| [frontend/src/App.css](frontend/src/App.css) | Styles de l'interface |
+
+### Détail des endpoints
+
+#### `POST /api/ask` — Agent conversationnel (SSE)
+
+```json
+// Requête
+{ "question": "Quel profil pour une mission ERP ?", "session_id": "uuid" }
+
+// Réponse (stream SSE)
+data: {"type": "tool", "content": "Recherche dans la base TdR..."}
+data: {"type": "token", "content": "D'après"}
+data: {"type": "token", "content": " le TdR..."}
+data: {"type": "done"}
+```
+
+#### `POST /api/search` — Recherche directe
+
+```json
+// Requête
+{ "query": "consultant formation", "organisation": "UNICEF", "lieu": "Maroc", "k": 12 }
+
+// Réponse
+{
+  "results": [
+    {
+      "source": "TDR-formation.pdf",
+      "score": 0.82,
+      "titre": "Recrutement consultant formation",
+      "organisation": "UNICEF",
+      "lieu": "Rabat, Maroc",
+      "budget": "30 000 USD",
+      "duree": "3 mois",
+      "date_limite": "15 juillet 2025",
+      "profil_consultant": "Expert formation, 5 ans exp.",
+      "objectifs": ["..."],
+      "livrables": ["..."]
+    }
+  ]
+}
+```
+
+#### `GET/POST /api/provider` — Switch provider
+
+```json
+// GET → provider actif
+{ "provider": "openai", "model": "gpt-4o", "status": "active" }
+
+// POST → switch
+{ "provider": "ollama" }
+// Réponse : { "provider": "ollama", "model": "qwen2.5:14b-instruct-q3_K_M", "status": "switched" }
+```
+
+### Décisions techniques et alternatives considérées
+
+| Décision | Choix retenu | Alternative écartée | Raison |
+|---|---|---|---|
+| Streaming | SSE (Server-Sent Events) | WebSockets | SSE est unidirectionnel, plus simple, suffisant pour le streaming de réponse |
+| Frontend | React + Vite (no TypeScript) | Next.js | Simplicité, pas de SSR nécessaire pour un outil interne |
+| CUDA conflict | `CUDA_VISIBLE_DEVICES=""` au démarrage | Désactiver le reranker GPU | Évite le conflit PyTorch + Ollama sur 6 Go VRAM sans perdre le reranking |
+| Clé API | Fichier `.env` (ignoré git) | Variable d'environnement manuelle | Simple et sécurisé pour usage local |
 
 ---
 
@@ -411,8 +484,9 @@ Question : "Quel profil de consultant pour une mission ERP ?"
 ### Prérequis
 
 - Python 3.11+
+- Node.js 18+ (pour le frontend)
 - [Tesseract OCR v5](https://github.com/UB-Mannheim/tesseract/wiki) installé dans `C:\Program Files\Tesseract-OCR\` (Windows) avec les langues `fra` et `eng`
-- [Ollama](https://ollama.com/) installé et en cours d'exécution
+- [Ollama](https://ollama.com/) installé et en cours d'exécution (optionnel si OpenAI utilisé)
 
 ### 1. Cloner le dépôt
 
@@ -421,7 +495,7 @@ git clone https://github.com/omarmarrakchi/agentic-rag-EY.git
 cd agentic-rag-EY
 ```
 
-### 2. Créer et activer le virtualenv
+### 2. Créer et activer le virtualenv Python
 
 ```bash
 cd backend
@@ -440,29 +514,28 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Télécharger le modèle BGE-M3
+### 4. Configurer la clé OpenAI (optionnel)
 
-Au premier lancement de `run_indexing.py`, le modèle (~2.3 Go) se télécharge automatiquement depuis HuggingFace. Pour le pré-télécharger :
+Créer un fichier `.env` à la racine du projet (copier `.env.example`) :
 
-```bash
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3'); print('BGE-M3 OK')"
+```
+OPENAI_API_KEY=sk-...
 ```
 
-### 5. Télécharger les modèles Ollama
+### 5. Télécharger le modèle Ollama (si provider local)
 
 ```bash
-ollama pull qwen2.5:7b    # utilisé pour le filtrage et le chunking
-ollama pull qwen2.5:14b   # utilisé pour l'agent RAG
+ollama pull qwen2.5:14b-instruct-q3_K_M
 ```
 
-Vérifier qu'Ollama tourne :
+### 6. Installer les dépendances frontend
 
 ```bash
-ollama list
-# qwen2.5:7b et qwen2.5:14b doivent apparaître dans la liste
+cd frontend
+npm install
 ```
 
-### 6. Placer les PDFs bruts
+### 7. Placer les PDFs bruts
 
 Copier les PDFs à analyser dans `data/raw_tdrs/`.
 
@@ -472,142 +545,82 @@ Copier les PDFs à analyser dans `data/raw_tdrs/`.
 
 ### Étape 1 — Filtrage des TdRs
 
-Depuis le dossier `backend/` (avec le venv activé) :
-
 ```bash
+cd backend
 python run_filter.py
 ```
 
-Le pipeline :
-1. Lit tous les PDFs de `data/raw_tdrs/`
-2. Extrait le texte (natif ou OCR)
-3. Calcule le score par mots-clés
-4. Passe les cas ambigus à Ollama
-5. Copie les fichiers dans `data/filtered_tdrs/` ou `data/rejected/`
-6. Sauvegarde un rapport JSON dans `backend/logs/`
-
-**Sortie attendue :**
-```
-INFO     99 PDFs trouvés dans data/raw_tdrs
-Filtrage TdRs: 100%|████████████| 99/99 [02:34<00:00]
-INFO     Terminé — TdRs: 58 | Rejetés: 41 | Erreurs: 1 | Ollama utilisé: 28 fois
-INFO     Rapport sauvegardé : backend/logs/filter_report_YYYYMMDD_HHMMSS.json
-```
-
 ### Étape 2 — Chunking des TdRs
-
-Depuis le dossier `backend/` (avec le venv activé) :
 
 ```bash
 python run_chunking.py
 ```
 
-Le pipeline :
-1. Lit tous les PDFs de `data/filtered_tdrs/`
-2. Extrait le texte complet (natif ou OCR toutes pages)
-3. Appelle Ollama pour extraire les métadonnées structurées
-4. Nettoie le texte
-5. Découpe en chunks parent-child
-6. Sauvegarde un JSON par TdR dans `data/chunks/`
-7. Sauvegarde un rapport JSON dans `backend/logs/`
-
-**Sortie attendue :**
-```
-INFO     58 TdRs trouvés dans data/filtered_tdrs
-Chunking TdRs: 100%|████████████| 58/58
-INFO     Terminé — Succès: 58 | Erreurs: 0 | Parents: 3970 | Children: 19586
-INFO     Rapport sauvegardé : backend/logs/chunking_report_YYYYMMDD_HHMMSS.json
-```
-
 ### Étape 3 — Indexation vectorielle
-
-Depuis le dossier `backend/` (avec le venv activé) :
 
 ```bash
 python run_indexing.py
 ```
 
-Le pipeline :
-1. Lit tous les JSON de `data/chunks/`
-2. Encode les children avec BGE-M3 par batch de 32
-3. Insère les children (avec embeddings) dans ChromaDB — collection `tdr_children`
-4. Insère les parents (sans embeddings) dans ChromaDB — collection `tdr_parents`
-5. Sauvegarde un rapport JSON dans `backend/logs/`
-
-**Sortie attendue :**
-```
-INFO     58 fichiers JSON trouvés dans data/chunks
-INFO     9793 children | 3970 parents à indexer
-INFO     Encodage des children avec BGE-M3 (peut prendre plusieurs minutes)...
-Encodage: 100%|████████████| 306/306 [batches]
-INFO     Encodage terminé — 9793 vecteurs de 1024 dimensions
-INFO     Terminé — Children indexés : 9793 | Parents stockés : 3970
-INFO     Rapport sauvegardé : backend/logs/indexing_report_YYYYMMDD_HHMMSS.json
-```
-
-### Étape 4 — Agent RAG (mode interactif)
-
-Depuis le dossier `backend/` (avec le venv activé et Ollama en cours d'exécution) :
+### Étape 4 — Agent RAG (mode CLI interactif)
 
 ```bash
 python run_agent.py
 ```
 
-L'agent :
-1. Charge `qwen2.5:14b` via Ollama
-2. Attend une question en français ou en anglais
-3. Recherche les chunks pertinents dans ChromaDB (`search_child_chunks`)
-4. Récupère le contexte complet des parents (`retrieve_parent_chunks`)
-5. Affiche la réponse en streaming (token par token)
-6. Conserve la mémoire de la conversation pour les questions suivantes
+### Étape 5 — Lancer l'API + l'interface web
 
-**Sortie attendue :**
-```
-============================================================
-   Agent RAG — Termes de Référence EY
-============================================================
-Tapez votre question en français ou en anglais.
-Tapez 'exit' pour quitter.
-
-Question : Quel est le profil recherché pour une mission ERP ?
-
-Réponse :
-[Recherche en cours...]
-D'après le TdR analysé (Source : TDR-ERP.pdf), le profil recherché
-est un expert en systèmes ERP avec au moins 10 ans d'expérience...
-
-Sources consultées : TDR-ERP.pdf
-────────────────────────────────────────────────────────────
+**Backend** (depuis `backend/`) :
+```bash
+python run_api.py
+# API disponible sur http://localhost:8000
 ```
 
-### Configuration
+**Frontend** (depuis `frontend/`) :
+```bash
+npm run dev
+# Interface disponible sur http://localhost:5173
+```
+
+**Changer de provider à chaud** :
+```bash
+# Basculer vers OpenAI
+curl -X POST http://localhost:8000/api/provider \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "openai"}'
+
+# Revenir en local
+curl -X POST http://localhost:8000/api/provider \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "ollama"}'
+```
+
+---
+
+## Configuration
 
 Tous les paramètres sont centralisés dans [backend/config/settings.py](backend/config/settings.py) :
 
 ```python
-# Étape 1 — Filtrage
-SCORE_TDR_CONFIRMED   = 5     # seuil minimum pour confirmer un TdR sans LLM
-SCORE_REJECTED        = 0     # seuil maximum pour rejeter sans LLM
-TEXT_EXTRACTION_CHARS = 5000  # caractères extraits par PDF pour la classification
-OCR_MAX_PAGES         = 3     # pages analysées par OCR
-OLLAMA_MODEL          = "qwen2.5:7b"
-TESSERACT_CMD         = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
 # Étape 2 — Chunking
-PARENT_CHUNK_SIZE     = 800   # caractères par parent chunk
-PARENT_CHUNK_OVERLAP  = 100   # chevauchement entre parents
-CHILD_CHUNK_SIZE      = 200   # caractères par child chunk
-CHILD_CHUNK_OVERLAP   = 20    # chevauchement entre children
+PARENT_CHUNK_SIZE     = 1500  # caractères par parent chunk
+CHILD_CHUNK_SIZE      = 400   # caractères par child chunk
 
 # Étape 3 — Indexation vectorielle
 EMBEDDING_MODEL       = "BAAI/bge-m3"
-EMBEDDING_BATCH_SIZE  = 32    # chunks encodés par batch
-COLLECTION_CHILDREN   = "tdr_children"
-COLLECTION_PARENTS    = "tdr_parents"
+EMBEDDING_BATCH_SIZE  = 64
 
 # Étape 4 — Agent RAG
-AGENT_MODEL           = "qwen2.5:14b"  # LLM pour le raisonnement
-AGENT_TOP_K           = 3              # nombre de children retournés par recherche
+AGENT_MODEL           = "qwen2.5:14b-instruct-q3_K_M"
+AGENT_TOP_K           = 10     # children récupérés par recherche hybride
+AGENT_SCORE_THRESHOLD = 0.45   # score minimum avant reranking
+RERANKER_MODEL        = "BAAI/bge-reranker-base"
+RERANKER_TOP_K        = 6      # résultats après reranking
+
+# Provider LLM
+AGENT_PROVIDER        = "ollama"   # "ollama" | "openai"
+OPENAI_MODEL          = "gpt-4o"
+OPENAI_API_KEY        = ""         # ou via .env
 ```
 
 ---
@@ -615,10 +628,10 @@ AGENT_TOP_K           = 3              # nombre de children retournés par reche
 ## Roadmap
 
 - [x] **Étape 1** — Filtrage des PDFs (scoring + LLM)
-- [x] **Étape 2** — Extraction et chunking des TdRs filtrés
-- [x] **Étape 3** — Indexation vectorielle (embeddings + base vectorielle)
-- [x] **Étape 4** — Agent RAG (LangGraph, pattern ReAct)
-- [ ] **Étape 5** — API FastAPI + UI React
+- [x] **Étape 2** — Extraction pymupdf4llm + chunking par sections Markdown + métadonnées LLM intelligentes
+- [x] **Étape 3** — Indexation vectorielle BGE-M3 + ChromaDB + recherche hybride BM25
+- [x] **Étape 4** — Agent RAG LangGraph ReAct + 6 outils + reranking cross-encoder + prompts duaux
+- [x] **Étape 5** — API FastAPI SSE + UI React (Chat + Recherche + Provider toggle Ollama/OpenAI)
 - [ ] **Étape 6** — Containerisation Docker Compose
 
 ---
@@ -627,38 +640,56 @@ AGENT_TOP_K           = 3              # nombre de children retournés par reche
 
 ```
 agentic-rag-ey/
+├── .env                           ← clés API (ignoré par git)
+├── .env.example                   ← template de configuration
 ├── data/
-│   ├── raw_tdrs/          ← PDFs bruts à analyser (non versionnés)
-│   ├── filtered_tdrs/     ← TdRs validés (non versionnés)
-│   └── rejected/          ← fichiers non-TdR (non versionnés)
+│   ├── raw_tdrs/                  ← PDFs bruts (non versionnés)
+│   ├── filtered_tdrs/             ← TdRs validés (non versionnés)
+│   ├── rejected/                  ← fichiers non-TdR (non versionnés)
+│   ├── chunks/                    ← JSON par TdR (non versionnés)
+│   └── vector_db/                 ← ChromaDB (non versionné)
 ├── backend/
 │   ├── config/
-│   │   └── settings.py    ← configuration centralisée
+│   │   └── settings.py            ← configuration centralisée + chargement .env
 │   ├── pipeline/
 │   │   ├── step1_filter/
-│   │   │   ├── pdf_reader.py          ← lecture + OCR
-│   │   │   ├── keyword_scorer.py      ← scoring mots-clés
-│   │   │   ├── llm_classifier.py      ← classification Ollama
-│   │   │   └── filter_pipeline.py     ← orchestrateur
+│   │   │   ├── pdf_reader.py      ← lecture + OCR
+│   │   │   ├── keyword_scorer.py  ← scoring mots-clés
+│   │   │   ├── llm_classifier.py  ← classification Ollama
+│   │   │   └── filter_pipeline.py ← orchestrateur
 │   │   ├── step2_chunking/
-│   │   │   ├── text_extractor.py      ← extraction texte complet
-│   │   │   ├── metadata_extractor.py  ← attributs TdR via Ollama
-│   │   │   ├── text_cleaner.py        ← nettoyage texte
-│   │   │   ├── chunker.py             ← découpage parent-child
-│   │   │   └── chunking_pipeline.py   ← orchestrateur
+│   │   │   ├── text_extractor.py  ← pymupdf4llm + OCR fallback
+│   │   │   ├── metadata_extractor.py ← extraction intelligente Ollama/OpenAI
+│   │   │   ├── text_cleaner.py    ← nettoyage Markdown
+│   │   │   ├── chunker.py         ← chunking par sections Markdown
+│   │   │   └── chunking_pipeline.py ← orchestrateur
 │   │   ├── step3_indexing/
-│   │   │   ├── embedder.py            ← BGE-M3, encodage par batch
-│   │   │   ├── vector_store.py        ← interface ChromaDB
-│   │   │   └── indexing_pipeline.py   ← orchestrateur
+│   │   │   ├── embedder.py        ← BGE-M3, batch, GPU/CPU
+│   │   │   ├── vector_store.py    ← ChromaDB + BM25 + hybrid_search + filtres
+│   │   │   └── indexing_pipeline.py ← orchestrateur
 │   │   └── step4_agent/
-│   │       ├── tools.py               ← outils ReAct (search + retrieve)
-│   │       ├── agent.py               ← graph LangGraph + mémoire
-│   │       └── agent_pipeline.py      ← interface ask() pour l'API
-│   ├── logs/              ← rapports JSON (non versionnés)
+│   │       ├── tools.py           ← 6 outils LangChain
+│   │       ├── agent.py           ← LangGraph + prompts duaux + provider factory
+│   │       ├── reranker.py        ← cross-encoder BAAI/bge-reranker-base
+│   │       └── agent_pipeline.py  ← interface ask()
+│   ├── api/
+│   │   ├── main.py                ← FastAPI app + CORS
+│   │   └── routes/
+│   │       ├── ask.py             ← POST /api/ask (SSE streaming)
+│   │       ├── search.py          ← POST /api/search (recherche directe)
+│   │       ├── provider.py        ← GET/POST /api/provider (switch LLM)
+│   │       └── health.py          ← GET /api/health
+│   ├── logs/                      ← rapports JSON (non versionnés)
 │   ├── requirements.txt
-│   ├── run_filter.py      ← point d'entrée étape 1
-│   ├── run_chunking.py    ← point d'entrée étape 2
-│   ├── run_indexing.py    ← point d'entrée étape 3
-│   └── run_agent.py       ← point d'entrée étape 4 (CLI interactive)
-└── frontend/              ← UI React (à venir)
+│   ├── run_filter.py
+│   ├── run_chunking.py
+│   ├── run_indexing.py
+│   ├── run_agent.py
+│   └── run_api.py                 ← point d'entrée API
+└── frontend/
+    ├── src/
+    │   ├── App.jsx                ← composant principal (Chat + Recherche + Toggle)
+    │   └── App.css                ← styles
+    ├── package.json
+    └── vite.config.js
 ```
