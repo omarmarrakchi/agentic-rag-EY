@@ -1,14 +1,15 @@
 """
-Découpe un texte en chunks hiérarchiques parent-child.
+Découpe un Markdown Docling en chunks hiérarchiques parent-child.
 
-Améliorations vs version précédente :
-  - RecursiveCharacterTextSplitter : coupe aux paragraphes/phrases,
-    jamais en milieu de mot.
-  - Blocs [TABLEAU]...[/TABLEAU] protégés : jamais fragmentés.
-  - Détection des titres de section : traités comme frontières naturelles.
+Stratégie de chunking par sections :
+  - Parent chunk = une section logique du document (délimitée par les titres ##/###)
+  - Si une section dépasse PARENT_CHUNK_SIZE → subdivisée avec RecursiveCharacterTextSplitter
+  - Child chunk  = subdivision d'un parent (~400 chars) pour la recherche vectorielle
 
-Parent chunk : grande fenêtre (~1500 chars) — contexte riche pour le LLM.
-Child chunk  : petite fenêtre (~400 chars) — précis pour la recherche vectorielle.
+Avantages vs chunking à taille fixe :
+  - Les chunks respectent les frontières sémantiques du document
+  - "Durée et lieu" ne se retrouve jamais coupé avec "Budget"
+  - Les tableaux Markdown restent intacts dans leur section
 """
 
 import re
@@ -25,18 +26,8 @@ from config.settings import (
     CHILD_CHUNK_OVERLAP,
 )
 
-# Séparateurs par ordre de priorité : paragraphe > ligne > phrase > mot
+# Séparateurs adaptés au Markdown Docling
 _SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
-
-# Regex de détection des titres de section courants dans les TdRs
-_SECTION_RE = re.compile(
-    r"(?m)^("
-    r"\d+[\.\)]\s+[A-ZÀÂÉÈÊËÎÏÔÙÛÜ\w]"        # "1. Objectifs" / "2) Profil"
-    r"|[IVX]+\.\s+[A-ZÀÂÉÈÊËÎÏÔÙÛÜ]"           # "I. Introduction"
-    r"|[A-ZÀÂÉÈÊËÎÏÔÙÛÜ]{3}[A-ZÀÂÉÈÊËÎÏÔÙÛÜ\s]{2,}$"  # "PROFIL DU CONSULTANT"
-    r"|(?:Article|Section|Chapitre|Annexe)\s+\d+"  # "Article 1"
-    r")"
-)
 
 
 def _sanitize_name(filename_stem: str) -> str:
@@ -44,35 +35,18 @@ def _sanitize_name(filename_stem: str) -> str:
     return sanitized[:40]
 
 
-def _protect_tables(text: str) -> tuple[str, dict]:
-    """Remplace les blocs [TABLEAU] par des clés pour éviter leur découpage."""
-    placeholders = {}
-    counter = [0]
-
-    def replace(m):
-        key = f"\n\n__TABLE_{counter[0]}__\n\n"
-        placeholders[f"__TABLE_{counter[0]}__"] = m.group(0)
-        counter[0] += 1
-        return key
-
-    processed = re.sub(r"\[TABLEAU\].*?\[/TABLEAU\]", replace, text, flags=re.DOTALL)
-    return processed, placeholders
-
-
-def _restore_tables(text: str, placeholders: dict) -> str:
-    for key, value in placeholders.items():
-        text = text.replace(key, value)
-    return text
-
-
-def _mark_sections(text: str) -> str:
-    """Insère un double saut de ligne avant chaque titre de section."""
-    return _SECTION_RE.sub(lambda m: f"\n\n{m.group()}", text)
+def _split_by_sections(markdown: str) -> list[str]:
+    """
+    Découpe le Markdown aux titres de niveau 1, 2 et 3 (# ## ###).
+    Chaque section = un bloc logique du document.
+    """
+    parts = re.split(r"\n(?=#{1,3} )", markdown)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def create_chunks(text: str, doc_name: str) -> dict:
     """
-    Crée les parents et children pour un document.
+    Crée les parents et children pour un document Markdown Docling.
 
     Retourne :
       {
@@ -82,13 +56,10 @@ def create_chunks(text: str, doc_name: str) -> dict:
     """
     safe_name = _sanitize_name(doc_name)
 
-    # 1. Protège les tableaux
-    processed, placeholders = _protect_tables(text)
+    # 1. Découpage en sections logiques (par titres Markdown)
+    sections = _split_by_sections(text)
 
-    # 2. Marque les frontières de section
-    processed = _mark_sections(processed)
-
-    # 3. Découpe en parents
+    # 2. Si une section dépasse PARENT_CHUNK_SIZE → on la subdivise
     parent_splitter = RecursiveCharacterTextSplitter(
         chunk_size=PARENT_CHUNK_SIZE,
         chunk_overlap=PARENT_CHUNK_OVERLAP,
@@ -102,32 +73,38 @@ def create_chunks(text: str, doc_name: str) -> dict:
         length_function=len,
     )
 
-    parent_texts = parent_splitter.split_text(processed)
+    # 3. Construction des parents
+    parent_texts: list[str] = []
+    for section in sections:
+        if len(section) <= PARENT_CHUNK_SIZE:
+            parent_texts.append(section)
+        else:
+            # Section trop longue → subdivisée
+            parent_texts.extend(parent_splitter.split_text(section))
 
+    # 4. Construction parent-child
     parents = []
     children = []
 
     for p_idx, p_text in enumerate(parent_texts):
-        # Restaure les tableaux dans le parent
-        p_text = _restore_tables(p_text, placeholders)
         p_id = f"{safe_name}_p{p_idx}"
+        child_texts = child_splitter.split_text(p_text)
         child_ids = []
 
-        child_texts = child_splitter.split_text(p_text)
         for c_idx, c_text in enumerate(child_texts):
             c_id = f"{safe_name}_c{p_idx}_{c_idx}"
             children.append({
                 "chunk_id": c_id,
-                "type": "child",
-                "text": c_text,
+                "type":     "child",
+                "text":     c_text,
                 "parent_id": p_id,
             })
             child_ids.append(c_id)
 
         parents.append({
             "chunk_id": p_id,
-            "type": "parent",
-            "text": p_text,
+            "type":     "parent",
+            "text":     p_text,
             "children": child_ids,
         })
 

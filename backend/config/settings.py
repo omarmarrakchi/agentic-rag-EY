@@ -1,4 +1,13 @@
+import os
 from pathlib import Path
+
+# Charge le fichier .env à la racine du projet (ignoré par git)
+_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text().splitlines():
+        if "=" in _line and not _line.startswith("#"):
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 # Racine du projet
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -28,7 +37,7 @@ OCR_MAX_PAGES = 3          # pages analysées par OCR (couvre les couvertures vi
 
 # ── Ollama ──────────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "qwen2.5:7b"    # modèle performant pour la classification
+OLLAMA_MODEL    = "qwen2.5:14b-instruct-q3_K_M"    # modèle pour filtrage + extraction métadonnées
 
 # ── Mots-clés de scoring ────────────────────────────────────────────────────
 KEYWORDS_STRONG = [
@@ -131,3 +140,9 @@ AGENT_TOP_K           = 10              # nombre de children récupérés par BG
 AGENT_SCORE_THRESHOLD = 0.45            # score minimum avant reranking
 RERANKER_MODEL        = "BAAI/bge-reranker-base"  # cross-encoder multilingue
 RERANKER_TOP_K        = 6               # nombre de résultats conservés après reranking
+
+# ── Provider LLM ────────────────────────────────────────────────────────────
+# Valeurs possibles : "ollama" | "openai"
+AGENT_PROVIDER = "openai"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL   = "gpt-4o"

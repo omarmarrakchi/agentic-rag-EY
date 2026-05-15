@@ -3,6 +3,8 @@ import './App.css'
 
 const SESSION_ID = crypto.randomUUID()
 
+const API_BASE = 'http://localhost:8000'
+
 function scoreColor(score) {
   if (score >= 0.7) return '#16a34a'
   if (score >= 0.5) return '#d97706'
@@ -16,6 +18,35 @@ function truncate(text, max = 180) {
 
 export default function App() {
   const [mode, setMode] = useState('chat')
+
+  // ── Provider state ────────────────────────────────────────────────────────
+  const [provider, setProvider] = useState('ollama')
+  const [providerLoading, setProviderLoading] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/provider`)
+      .then(r => r.json())
+      .then(d => setProvider(d.provider))
+      .catch(() => {})
+  }, [])
+
+  async function toggleProvider() {
+    if (providerLoading) return
+    const next = provider === 'ollama' ? 'openai' : 'ollama'
+    setProviderLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: next }),
+      })
+      const data = await res.json()
+      setProvider(data.provider)
+    } catch {
+    } finally {
+      setProviderLoading(false)
+    }
+  }
 
   // ── Chat state ────────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([{
@@ -192,6 +223,14 @@ export default function App() {
             Recherche
           </button>
         </nav>
+
+        <div className="provider-switch" onClick={toggleProvider} title={`Basculer vers ${provider === 'ollama' ? 'GPT-4o' : 'Ollama local'}`}>
+          <span className={`provider-label ${provider === 'ollama' ? 'active' : ''}`}>Ollama</span>
+          <div className={`toggle-track ${provider === 'openai' ? 'on' : ''} ${providerLoading ? 'loading' : ''}`}>
+            <div className="toggle-thumb" />
+          </div>
+          <span className={`provider-label ${provider === 'openai' ? 'active' : ''}`}>GPT-4o</span>
+        </div>
       </header>
 
       {/* ── Chat mode ────────────────────────────────────────────────────── */}

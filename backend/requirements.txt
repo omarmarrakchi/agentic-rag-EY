@@ -1,6 +1,6 @@
 # ── Extraction PDF ───────────────────────────────────────────────────────────
-pymupdf==1.25.5          # extraction texte natif + détection images
-pdfplumber==0.11.4       # extraction tableaux
+pymupdf==1.25.5          # extraction PDF
+pymupdf4llm>=0.0.17      # conversion PDF → Markdown structuré (rapide, sans modèles ML)
 
 # ── OCR (PDFs scannés) ───────────────────────────────────────────────────────
 pytesseract==0.3.13      # wrapper Python pour Tesseract OCR
@@ -18,8 +18,10 @@ sentence-transformers==3.4.1  # modèle BAAI/bge-m3 pour les embeddings
 chromadb==1.0.8               # base vectorielle locale
 
 # ── Étape 4 — Agent RAG ──────────────────────────────────────────────────────
+rank-bm25>=0.2.2              # recherche lexicale BM25 pour hybrid search
 langchain==1.3.0              # framework agent + outils
 langchain-ollama==1.1.0       # connecteur LangChain ↔ Ollama
+langchain-openai>=0.3.0       # connecteur LangChain ↔ OpenAI API
 langchain-text-splitters==1.1.2  # RecursiveCharacterTextSplitter (chunking intelligent)
 langgraph==1.2.0              # orchestration du graph ReAct + mémoire
 

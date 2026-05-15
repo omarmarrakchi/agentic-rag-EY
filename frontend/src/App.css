@@ -47,6 +47,60 @@
   color: #aaa;
 }
 
+/* ── Provider switch ─────────────────────────────────────────────────────── */
+.provider-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.provider-label {
+  font-size: 12px;
+  color: #888;
+  transition: color 0.2s;
+  font-weight: 500;
+}
+
+.provider-label.active {
+  color: #FFE600;
+  font-weight: 700;
+}
+
+.toggle-track {
+  width: 40px;
+  height: 22px;
+  background: #555;
+  border-radius: 11px;
+  position: relative;
+  transition: background 0.25s;
+}
+
+.toggle-track.on {
+  background: #FFE600;
+}
+
+.toggle-track.loading {
+  opacity: 0.5;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.25s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.toggle-track.on .toggle-thumb {
+  transform: translateX(18px);
+}
+
 /* ── Mode tabs ───────────────────────────────────────────────────────────── */
 .mode-tabs {
   display: flex;
