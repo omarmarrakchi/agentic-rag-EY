@@ -159,6 +159,20 @@ def get_parents_by_ids(parent_ids: list[str]) -> list[dict]:
     return parents
 
 
+def get_all_parents(limit: int = 500) -> list[dict]:
+    """Récupère tous les parents — utilisé pour la recherche par filtres sans query."""
+    collection = get_parents_collection()
+    results = collection.get(limit=limit, include=["documents", "metadatas"])
+    parents = []
+    for i in range(len(results["ids"])):
+        parents.append({
+            "chunk_id": results["ids"][i],
+            "text":     results["documents"][i],
+            "metadata": results["metadatas"][i],
+        })
+    return parents
+
+
 def collection_stats() -> dict:
     """Retourne le nombre de documents dans chaque collection."""
     return {

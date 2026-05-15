@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.ask import router as ask_router
 from api.routes.health import router as health_router
+from api.routes.search import router as search_router
 
 app = FastAPI(title="Agentic RAG — TdRs EY", version="1.0.0")
 
@@ -28,3 +29,4 @@ app.add_middleware(
 
 app.include_router(ask_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
+app.include_router(search_router, prefix="/api")
