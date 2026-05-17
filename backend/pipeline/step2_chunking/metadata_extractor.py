@@ -100,6 +100,8 @@ def _extract_smart(text: str) -> str:
             if budget <= 0:
                 break
 
+    if not selected_parts:
+        return head
     return head + "\n\n" + "\n\n".join(selected_parts)
 
 
