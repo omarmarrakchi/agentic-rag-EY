@@ -609,6 +609,83 @@ python tests/evaluate_rag.py
 
 ---
 
+## Étape 7 — Containerisation Docker Compose
+
+### Problème
+
+Le projet nécessite Python 3.11, Node.js 20, des modèles ML (~2.3 Go), ChromaDB et Ollama. L'installation manuelle prend ~30 minutes et varie selon les OS. Docker permet de livrer un environnement identique en une seule commande.
+
+### Architecture des conteneurs
+
+```
+docker compose up
+        │
+        ├── [frontend]  node:20-alpine → Vite build → nginx:alpine
+        │               Port 5173:80
+        │               Proxy /api/* → backend:8000
+        │
+        └── [backend]   python:3.11-slim
+                        Port 8000:8000
+                        Volumes :
+                          ./data/          → /app/data/        (ChromaDB + chunks)
+                          hf_cache volume  → /root/.cache/huggingface (BGE-M3 + reranker)
+                        Env :
+                          OLLAMA_BASE_URL=http://host.docker.internal:11434
+                          OPENAI_API_KEY (via .env)
+```
+
+**Ollama reste sur la machine hôte** — le conteneur backend le joint via `host.docker.internal:11434`.
+
+### Fichiers créés
+
+| Fichier | Rôle |
+|---|---|
+| [docker-compose.yml](docker-compose.yml) | Orchestrateur : backend + frontend + volume HuggingFace |
+| [backend/Dockerfile](backend/Dockerfile) | Image Python : torch CPU + deps + code FastAPI |
+| [backend/.dockerignore](backend/.dockerignore) | Exclut venv, cache, logs, résultats benchmarks |
+| [frontend/Dockerfile](frontend/Dockerfile) | Build Vite (node:20) → Nginx (2 stages) |
+| [frontend/nginx.conf](frontend/nginx.conf) | Sert le build React + proxy SSE `/api/*` → backend |
+| [frontend/.dockerignore](frontend/.dockerignore) | Exclut node_modules, dist |
+
+### Décisions techniques
+
+| Décision | Choix retenu | Raison |
+|---|---|---|
+| Torch | CPU-only (`--index-url .../cpu`) | GPU réservé à Ollama hôte, réduit l'image de ~2 Go |
+| Frontend | Build multi-stage node:20 → nginx | Image finale ~25 Mo au lieu de ~500 Mo avec node |
+| Ollama | Sur hôte, pas dans Docker | Évite de dupliquer les modèles (~10 Go) |
+| Modèles HF | Volume nommé `hf_cache` | Téléchargés une seule fois, persistés entre rebuilds |
+| API calls | `API_BASE = ''` (URLs relatives) | Nginx proxy gère `/api/*` → pas de CORS ni hardcode |
+
+### Prérequis
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop) installé et démarré
+- Ollama en cours d'exécution sur la machine hôte
+- Fichier `.env` à la racine (contenant `OPENAI_API_KEY`)
+
+### Lancer avec Docker
+
+```bash
+# Premier lancement (build des images ~10-15 min)
+docker compose up --build
+
+# Lancements suivants (images déjà buildées)
+docker compose up
+
+# En arrière-plan
+docker compose up -d
+
+# Arrêter
+docker compose down
+```
+
+- **Interface** → [http://localhost:5173](http://localhost:5173)
+- **API** → [http://localhost:8000](http://localhost:8000)
+
+> **Note** : le premier démarrage télécharge BGE-M3 (~2.3 Go) et bge-reranker-base (~1 Go) dans le volume `hf_cache`. Les démarrages suivants sont instantanés.
+
+---
+
 ## Installation
 
 ### Prérequis
@@ -712,6 +789,15 @@ npm run dev
 # Interface disponible sur http://localhost:5173
 ```
 
+### Étape 7 — Docker Compose (alternative à l'installation manuelle)
+
+```bash
+# À la racine du projet
+docker compose up --build
+# Interface → http://localhost:5173
+# API       → http://localhost:8000
+```
+
 ### Étape 6 — Tests & Benchmarking
 
 **Tests unitaires** (sans API) :
@@ -786,7 +872,7 @@ OPENAI_API_KEY        = ""         # ou via .env
 - [x] **Étape 4** — Agent RAG LangGraph ReAct + 6 outils + reranking cross-encoder + prompts duaux
 - [x] **Étape 5** — API FastAPI SSE + UI React (Chat + Recherche + Provider toggle Ollama/OpenAI)
 - [x] **Étape 6** — Tests unitaires pytest + benchmarks vectoriel/hybride + évaluation RAGAS
-- [ ] **Étape 7** — Containerisation Docker Compose
+- [x] **Étape 7** — Containerisation Docker Compose (backend Python + frontend Nginx)
 
 ---
 
@@ -794,6 +880,7 @@ OPENAI_API_KEY        = ""         # ou via .env
 
 ```
 agentic-rag-ey/
+├── docker-compose.yml             ← orchestrateur Docker (backend + frontend)
 ├── .env                           ← clés API (ignoré par git)
 ├── .env.example                   ← template de configuration
 ├── data/
@@ -844,6 +931,8 @@ agentic-rag-ey/
 │   │   ├── benchmark_search.py    ← vectoriel vs hybride
 │   │   └── benchmark_providers.py ← Ollama vs OpenAI
 │   ├── logs/                      ← rapports JSON (non versionnés)
+│   ├── Dockerfile                 ← image Python backend
+│   ├── .dockerignore
 │   ├── requirements.txt
 │   ├── run_filter.py
 │   ├── run_chunking.py
@@ -854,6 +943,9 @@ agentic-rag-ey/
     ├── src/
     │   ├── App.jsx                ← composant principal (Chat + Recherche + Toggle)
     │   └── App.css                ← styles
+    ├── Dockerfile                 ← build Vite → Nginx (multi-stage)
+    ├── nginx.conf                 ← proxy /api/* → backend + SPA routing
+    ├── .dockerignore
     ├── package.json
     └── vite.config.js
 ```

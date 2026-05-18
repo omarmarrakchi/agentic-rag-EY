@@ -36,7 +36,7 @@ OCR_LANGUAGES = "fra+eng"  # français + anglais
 OCR_MAX_PAGES = 3          # pages analysées par OCR (couvre les couvertures vides)
 
 # ── Ollama ──────────────────────────────────────────────────────────────────
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL    = "qwen2.5:14b-instruct-q3_K_M"    # modèle pour filtrage + extraction métadonnées
 
 # ── Mots-clés de scoring ────────────────────────────────────────────────────

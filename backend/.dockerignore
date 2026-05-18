@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+logs/
+*.log
+tests/benchmark_*.json
+tests/eval_results_*.json

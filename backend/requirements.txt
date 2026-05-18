@@ -7,7 +7,7 @@ pytesseract==0.3.13      # wrapper Python pour Tesseract OCR
 Pillow==11.2.1           # manipulation d'images pour l'OCR
 
 # ── LLM local (Ollama) ───────────────────────────────────────────────────────
-ollama==0.4.8            # client Python officiel Ollama
+ollama>=0.6.1,<1.0.0     # client Python officiel Ollama (contraint par langchain-ollama 1.1.0)
 
 # ── Utilitaires ─────────────────────────────────────────────────────────────
 tqdm==4.67.1             # barre de progression
@@ -26,6 +26,11 @@ langchain-text-splitters==1.1.2  # RecursiveCharacterTextSplitter (chunking inte
 langgraph==1.2.0              # orchestration du graph ReAct + mémoire
 
 # ── Étape 5 — API + Interface Web ────────────────────────────────────────────
-fastapi==0.115.12             # framework API REST
+fastapi==0.115.9              # framework API REST (contraint par chromadb 1.0.8)
 uvicorn==0.34.2               # serveur ASGI
 sse-starlette==2.3.5          # streaming SSE pour FastAPI
+
+# ── Étape 6 — Tests & Benchmarking ───────────────────────────────────────────
+pytest>=8.0.0                 # framework de tests unitaires
+ragas>=0.1.0                  # évaluation RAG (faithfulness, relevancy, recall)
+datasets>=2.0.0               # requis par RAGAS

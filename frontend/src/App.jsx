@@ -3,7 +3,7 @@ import './App.css'
 
 const SESSION_ID = crypto.randomUUID()
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = ''
 
 function scoreColor(score) {
   if (score >= 0.7) return '#16a34a'
